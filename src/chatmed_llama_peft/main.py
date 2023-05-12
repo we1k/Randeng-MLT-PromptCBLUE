@@ -30,11 +30,12 @@ from rouge_chinese import Rouge
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 import torch
 
+import wandb
+
 import transformers
 from transformers import (
     AutoConfig,
     AutoModel,
-    AutoTokenizer,
     AutoTokenizer,
     DataCollatorForSeq2Seq,
     HfArgumentParser,
@@ -45,24 +46,24 @@ from transformers import (
 import sys
 
 sys.path.append("./")
-
+os.environ['CUDA_VISIBLE_DEVICES']='0,1,2,3'
 
 from transformers import (
     LlamaTokenizer,
     LlamaConfig,
     LlamaForCausalLM,
     Seq2SeqTrainer,
+    Trainer,
 )
 
 from src.chatmed_llama_peft.arguments import ModelArguments, DataTrainingArguments
-
 
 from peft import PeftModel, LoraConfig, TaskType, get_peft_model, get_peft_model_state_dict
 
 logger = logging.getLogger(__name__)
 
 def main():
-
+    
     parser = HfArgumentParser((ModelArguments, DataTrainingArguments, Seq2SeqTrainingArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
@@ -71,6 +72,10 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
+    wandb.init(
+        project='llama_peft',
+        name=training_args.run_name
+    )
     # Setup logging
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -130,9 +135,6 @@ def main():
         # trust_remote_code=True
     )
 
-    config.pre_seq_len = model_args.pre_seq_len
-    config.prefix_projection = model_args.prefix_projection
-
 
     tokenizer = LlamaTokenizer.from_pretrained(
         model_args.model_name_or_path,
@@ -162,7 +164,7 @@ def main():
         print(lora_rank)
         peft_config = LoraConfig(
             task_type=TaskType.CAUSAL_LM,
-            target_modules=target_modules,
+            target_modules=target_modules[0],
             inference_mode=False,
             r=lora_rank, lora_alpha=lora_alpha,
             lora_dropout=lora_dropout,
@@ -171,8 +173,8 @@ def main():
         model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()
 
-    for n, p in model.named_parameters():
-        print(n, p.requires_grad, p.numel())
+    # for n, p in model.named_parameters():
+    #     print(n, p.requires_grad, p.numel())
         
     if model_args.quantization_bit is not None:
         print(f"Quantized to {model_args.quantization_bit} bit")
@@ -282,9 +284,11 @@ def main():
     def print_dataset_example(example):
         print("input_ids",example["input_ids"])
         print("inputs", tokenizer.decode(example["input_ids"]))
-        print("label_ids", example["labels"])
-        print("labels", tokenizer.decode(example["labels"]))
-
+        print("label_ids", len(example["labels"]))
+        print()
+        labels = list(map(lambda x: tokenizer.pad_token_id if x == -100 else x, example['labels']))
+        print("labels", tokenizer.decode(labels))
+        
     if training_args.do_train:
         if "train" not in raw_datasets:
             raise ValueError("--do_train requires a train dataset")
@@ -301,8 +305,8 @@ def main():
                 load_from_cache_file=False,
                 desc="Running tokenizer on train dataset",
             )
-        print_dataset_example(train_dataset[0])
-        print_dataset_example(train_dataset[1])
+        # print_dataset_example(train_dataset[0])
+        # print_dataset_example(train_dataset[1])
 
     if training_args.do_eval:
         max_target_length = data_args.val_max_target_length
@@ -359,10 +363,11 @@ def main():
         preds, labels = eval_preds
         if isinstance(preds, tuple):
             preds = preds[0]
-        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
         if data_args.ignore_pad_token_for_loss:
             # Replace -100 in the labels as we can't decode them.
+            preds = np.where(preds != -100, preds, tokenizer.pad_token_id)
             labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
         decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
         score_dict = {
@@ -415,6 +420,7 @@ def main():
             checkpoint = training_args.resume_from_checkpoint
         # elif last_checkpoint is not None:
         #     checkpoint = last_checkpoint
+        logger.info(f"load checkpoint from {training_args.resume_from_checkpoint}")
         model.gradient_checkpointing_enable()
         model.enable_input_require_grads()
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
@@ -433,8 +439,22 @@ def main():
     # Evaluation
     results = {}
     if training_args.do_eval:
-        logger.info("*** Evaluate ***")
-        metrics = trainer.evaluate(metric_key_prefix="eval", do_sample=True, top_p=0.7, max_length=512, temperature=0.95)
+        # import torch
+        # from torch.utils.data import DataLoader
+        # logger.info("*** Evaluate ***")
+        # # naive dataloader
+        # for batch in dataloader:
+        #     batch = {k:v.to('cuda') for k,v in batch.item()}
+        #     output = model.generate(
+        #         batch['input_ids'],
+        #         do_sample=True, top_p=0.7, max_length=512, temperature=0.2
+        #     )
+        #     print(tokenizer.batch_decode(batch['labels'], skip_special_tokens=True))
+        #     print(tokenizer.batch_decode(output, skip_special_tokens=True))
+        
+        
+        
+        metrics = trainer.evaluate(metric_key_prefix="eval", do_sample=True, top_p=0.7, max_length=512, temperature=0.2)
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
         metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
 
