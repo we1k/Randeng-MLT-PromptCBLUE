@@ -37,9 +37,14 @@ from transformers import (
     AutoConfig,
     AutoModel,
     AutoTokenizer,
+    DataCollatorForLanguageModeling,
     DataCollatorForSeq2Seq,
     HfArgumentParser,
+    Trainer,
+    TrainingArguments,
+    Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
+    is_torch_tpu_available,
     set_seed,
 )
 
@@ -52,8 +57,6 @@ from transformers import (
     LlamaTokenizer,
     LlamaConfig,
     LlamaForCausalLM,
-    Seq2SeqTrainer,
-    Trainer,
 )
 
 from src.chatmed_llama_peft.arguments import ModelArguments, DataTrainingArguments
@@ -64,7 +67,7 @@ logger = logging.getLogger(__name__)
 
 def main():
     
-    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, Seq2SeqTrainingArguments))
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
     if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
         # If we pass only one argument to the script and it's the path to a json file,
         # let's parse it to get our arguments.
@@ -203,160 +206,129 @@ def main():
     # Temporarily set max_target_length for training.
     max_target_length = data_args.max_target_length
 
-    def preprocess_function_eval(examples):
-        inputs, targets = [], []
-        for i in range(len(examples[prompt_column])):
-            if examples[prompt_column][i] and examples[response_column][i]:
-                query = examples[prompt_column][i]
-                if history_column is None or len(examples[history_column][i]) == 0:
-                    prompt = query
-                else:
-                    prompt = ""
-                    history = examples[history_column][i]
-                    for turn_idx, (old_query, response) in enumerate(history):
-                        prompt += "[Round {}]\n问：{}\n答：{}\n".format(turn_idx, old_query, response)
-                    prompt += "[Round {}]\n问：{}\n答：".format(len(history), query)
-                inputs.append(prompt)
-                targets.append(examples[response_column][i])
+    def preprocess_function(examples):
+        return tokenizer([x + y for x, y in zip(examples[prompt_column], examples[response_column])])
 
-        inputs = [prefix + inp for inp in inputs]
-        model_inputs = tokenizer(inputs, max_length=data_args.max_source_length, truncation=True, padding=True)
-        labels = tokenizer(text_target=targets, max_length=max_target_length, truncation=True)
+    tokenized_datasets = raw_datasets.map(
+        preprocess_function,
+        batched=True,
+        num_proc=data_args.preprocessing_num_workers,
+        remove_columns=column_names,
+        load_from_cache_file=False,
+    )
+    
+    
+    if data_args.block_size is None:
+        block_size = tokenizer.model_max_length
+        if block_size > 1024:
+            logger.warn(
+                f"The tokenizer picked seems to have a very large `model_max_length` ({tokenizer.model_max_length}). "
+                "Picking 1024 instead. You can change that default value by passing --block_size xxx."
+            )
+        block_size = 1024
+    else:
+        if data_args.block_size > tokenizer.model_max_length:
+            logger.warn(
+                f"The block_size passed ({data_args.block_size}) is larger than the maximum length for the model"
+                f"({tokenizer.model_max_length}). Using block_size={tokenizer.model_max_length}."
+            )
+        block_size = min(data_args.block_size, tokenizer.model_max_length)
 
-        if data_args.ignore_pad_token_for_loss:
-            labels["input_ids"] = [
-                [(l if l != tokenizer.pad_token_id else -100) for l in label] for label in labels["input_ids"]
-            ]
-        model_inputs["labels"] = labels["input_ids"]
+    # Main data processing function that will make each entry its own in the dataset
+    def single_texts(examples):
+        result = examples
+        result["labels"] = examples["input_ids"].copy()
+        return result
 
-        return model_inputs
-
-    def preprocess_function_train(examples):
-        max_seq_length = data_args.max_source_length + data_args.max_target_length
-
-        model_inputs = {
-            "input_ids": [],
-            "labels": [],
+    # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
+    def group_texts(examples):
+        # Concatenate all texts.
+        concatenated_examples = {
+            k: sum(examples[k], []) for k in examples.keys()}
+        total_length = len(concatenated_examples[list(examples.keys())[0]])
+        # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
+        # customize this part to your needs.
+        total_length = (total_length // block_size) * block_size
+        # Split by chunks of max_len.
+        result = {
+            k: [t[i: i + block_size]
+                for i in range(0, total_length, block_size)]
+            for k, t in concatenated_examples.items()
         }
-        for i in range(len(examples[prompt_column])):
-            if examples[prompt_column][i] and examples[response_column][i]:
-                query, answer = examples[prompt_column][i], examples[response_column][i]
+        result["labels"] = result["input_ids"].copy()
+        return result
 
-                if history_column is None:
-                    prompt = query
-                else:
-                    prompt = ""
-                    history = examples[history_column][i]
-                    for turn_idx, (old_query, response) in enumerate(history):
-                        prompt += "[Round {}]\n问：{}\n答：{}\n".format(turn_idx, old_query, response)
-                    prompt += "[Round {}]\n问：{}\n答：".format(len(history), query)
+    if data_args.group_texts:
+        lm_datasets = tokenized_datasets.map(
+            group_texts,
+            batched=True,
+            num_proc=data_args.preprocessing_num_workers,
+            load_from_cache_file=not data_args.overwrite_cache,
+        )
+        logger.info("Grouping texts together")
 
-                prompt = prefix + prompt
-                a_ids = tokenizer.encode(text=prompt, add_special_tokens=False)
-                b_ids = tokenizer.encode(text=answer, add_special_tokens=False)
-
-                if len(a_ids) > data_args.max_source_length - 1:
-                    a_ids = a_ids[: data_args.max_source_length - 1]
-
-                if len(b_ids) > data_args.max_target_length - 2:
-                    b_ids = b_ids[: data_args.max_target_length - 2]
-
-                input_ids = tokenizer.build_inputs_with_special_tokens(a_ids, b_ids)
-
-                context_length = input_ids.index(tokenizer.bos_token_id)
-                mask_position = context_length - 1
-                labels = [-100] * context_length + input_ids[mask_position+1:]
-                
-                pad_len = max_seq_length - len(input_ids)
-                input_ids = input_ids + [tokenizer.pad_token_id] * pad_len
-                labels = labels + [tokenizer.pad_token_id] * pad_len
-                # print("input_ids: ", input_ids)
-                # print("labels: ", labels)
-
-                if data_args.ignore_pad_token_for_loss:
-                    labels = [(l if l != tokenizer.pad_token_id else -100) for l in labels]
-
-                model_inputs["input_ids"].append(input_ids)
-                model_inputs["labels"].append(labels)
-
-        return model_inputs
+    else:
+        lm_datasets = tokenized_datasets.map(
+            single_texts,
+            batched=True,
+            num_proc=data_args.preprocessing_num_workers,
+            load_from_cache_file=not data_args.overwrite_cache,
+        )
+        logger.info("Grouping texts into single entries")
     
     def print_dataset_example(example):
         print("input_ids",example["input_ids"])
         print("inputs", tokenizer.decode(example["input_ids"]))
         print("label_ids", len(example["labels"]))
-        print()
         labels = list(map(lambda x: tokenizer.pad_token_id if x == -100 else x, example['labels']))
         print("labels", tokenizer.decode(labels))
         
     if training_args.do_train:
-        if "train" not in raw_datasets:
+        if "train" not in lm_datasets:
             raise ValueError("--do_train requires a train dataset")
-        train_dataset = raw_datasets["train"]
+        train_dataset = lm_datasets["train"]
         if data_args.max_train_samples is not None:
             max_train_samples = min(len(train_dataset), data_args.max_train_samples)
             train_dataset = train_dataset.select(range(max_train_samples))
-        with training_args.main_process_first(desc="train dataset map pre-processing"):
-            train_dataset = train_dataset.map(
-                preprocess_function_train,
-                batched=True,
-                num_proc=data_args.preprocessing_num_workers,
-                remove_columns=column_names,
-                load_from_cache_file=False,
-                desc="Running tokenizer on train dataset",
-            )
         # print_dataset_example(train_dataset[0])
         # print_dataset_example(train_dataset[1])
 
     if training_args.do_eval:
         max_target_length = data_args.val_max_target_length
-        if "validation" not in raw_datasets:
+        if "validation" not in lm_datasets:
             raise ValueError("--do_eval requires a validation dataset")
-        eval_dataset = raw_datasets["validation"]
+        eval_dataset = lm_datasets["validation"]
         if data_args.max_eval_samples is not None:
             max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
             eval_dataset = eval_dataset.select(range(max_eval_samples))
-        with training_args.main_process_first(desc="validation dataset map pre-processing"):
-            eval_dataset = eval_dataset.map(
-                preprocess_function_eval,
-                batched=True,
-                num_proc=data_args.preprocessing_num_workers,
-                remove_columns=column_names,
-                load_from_cache_file=False,
-                desc="Running tokenizer on validation dataset",
-            )
-        print_dataset_example(eval_dataset[0])
-        print_dataset_example(eval_dataset[1])
+        # print_dataset_example(eval_dataset[0])
+        # print_dataset_example(eval_dataset[1])
 
     if training_args.do_predict:
         max_target_length = data_args.val_max_target_length
-        if "test" not in raw_datasets:
+        if "test" not in lm_datasets:
             raise ValueError("--do_predict requires a test dataset")
-        predict_dataset = raw_datasets["test"]
+        predict_dataset = lm_datasets["test"]
         if data_args.max_predict_samples is not None:
             max_predict_samples = min(len(predict_dataset), data_args.max_predict_samples)
             predict_dataset = predict_dataset.select(range(max_predict_samples))
-        with training_args.main_process_first(desc="prediction dataset map pre-processing"):
-            predict_dataset = predict_dataset.map(
-                preprocess_function_eval,
-                batched=True,
-                num_proc=data_args.preprocessing_num_workers,
-                remove_columns=column_names,
-                load_from_cache_file=False,
-                desc="Running tokenizer on prediction dataset",
-            )
-        print_dataset_example(predict_dataset[0])
-        print_dataset_example(predict_dataset[1])
+        # print_dataset_example(predict_dataset[0])
+        # print_dataset_example(predict_dataset[1])
 
-    # Data collator
-    label_pad_token_id = -100 if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
-    data_collator = DataCollatorForSeq2Seq(
-        tokenizer,
-        model=model,
-        label_pad_token_id=label_pad_token_id,
-        pad_to_multiple_of=None,
-        padding=False
+    
+    # DataCollator
+    tokenizer.pad_token = tokenizer.eos_token
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False,
     )
+    
+    def preprocess_logits_for_metrics(logits, labels):
+        if isinstance(logits, tuple):
+            # Depending on the model and config, logits may contain extra tensors,
+            # like past_key_values, but logits always come first
+            logits = logits[0]
+        return logits.argmax(dim=-1)
 
     # Metric
     def compute_metrics(eval_preds):
@@ -392,25 +364,18 @@ def main():
             score_dict[k] = float(np.mean(v))
         return score_dict
 
-    # Override the decoding parameters of Seq2SeqTrainer
-    training_args.generation_max_length = (
-        training_args.generation_max_length
-        if training_args.generation_max_length is not None
-        else data_args.val_max_target_length
-    )
-    training_args.generation_num_beams = (
-        data_args.num_beams if data_args.num_beams is not None else training_args.generation_num_beams
-    )
+    
     # Initialize our Trainer
-    trainer = Seq2SeqTrainer(
+    trainer = Trainer(
         model=model,
         args=training_args,
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
         tokenizer=tokenizer,
         data_collator=data_collator,
-        compute_metrics=compute_metrics if training_args.predict_with_generate else None,
-        # save_prefixencoder=model_args.pre_seq_len is not None
+        compute_metrics=compute_metrics,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics
+        if training_args.do_eval and not is_torch_tpu_available() else None,
     )
 
     # Training
@@ -439,22 +404,7 @@ def main():
     # Evaluation
     results = {}
     if training_args.do_eval:
-        # import torch
-        # from torch.utils.data import DataLoader
-        # logger.info("*** Evaluate ***")
-        # # naive dataloader
-        # for batch in dataloader:
-        #     batch = {k:v.to('cuda') for k,v in batch.item()}
-        #     output = model.generate(
-        #         batch['input_ids'],
-        #         do_sample=True, top_p=0.7, max_length=512, temperature=0.2
-        #     )
-        #     print(tokenizer.batch_decode(batch['labels'], skip_special_tokens=True))
-        #     print(tokenizer.batch_decode(output, skip_special_tokens=True))
-        
-        
-        
-        metrics = trainer.evaluate(metric_key_prefix="eval", do_sample=True, top_p=0.7, max_length=512, temperature=0.2)
+        metrics = trainer.evaluate()
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
         metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
 
@@ -473,13 +423,6 @@ def main():
 
         predict_results = trainer.predict(
             predict_dataset,
-            metric_key_prefix="predict",
-            # max_tokens=512,
-            max_new_tokens=data_args.max_target_length,
-            do_sample=True,
-            top_p=0.7,
-            temperature=0.95,
-            # repetition_penalty=1.1
         )
         metrics = predict_results.metrics
         print(metrics)
