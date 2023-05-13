@@ -23,6 +23,7 @@ import os
 import sys
 import json
 
+import math
 import numpy as np
 from datasets import load_dataset
 import jieba 
@@ -153,6 +154,7 @@ def main():
     # for n, p in model.named_parameters():
     #     print(n, p.requires_grad)
 
+    # model.resize_token_embeddings(len(tokenizer))
     if model_args.peft_path is not None:
         logger.info("Peft from pre-trained model")
         model = PeftModel.from_pretrained(model, model_args.peft_path)
@@ -175,6 +177,13 @@ def main():
         )
         model = get_peft_model(model, peft_config)
     model.print_trainable_parameters()
+    
+    # old_state_dict = model.state_dict
+    # model.state_dict = (
+    #     lambda self, *_, **__: get_peft_model_state_dict(self, old_state_dict())
+    # ).__get__(model, type(model))
+    # for n, p in model.named_parameters():
+    #     print(n, p.requires_grad)
 
     # for n, p in model.named_parameters():
     #     print(n, p.requires_grad, p.numel())
@@ -316,19 +325,7 @@ def main():
         # print_dataset_example(predict_dataset[1])
 
     
-    # DataCollator
-    tokenizer.pad_token = tokenizer.eos_token
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False,
-    )
-    
-    def preprocess_logits_for_metrics(logits, labels):
-        if isinstance(logits, tuple):
-            # Depending on the model and config, logits may contain extra tensors,
-            # like past_key_values, but logits always come first
-            logits = logits[0]
-        return logits.argmax(dim=-1)
+
 
     # Metric
     def compute_metrics(eval_preds):
@@ -364,6 +361,68 @@ def main():
             score_dict[k] = float(np.mean(v))
         return score_dict
 
+    def preprocess_logits_for_metrics(logits, labels):
+        if isinstance(logits, tuple):
+            # Depending on the model and config, logits may contain extra tensors,
+            # like past_key_values, but logits always come first
+            logits = logits[0]
+        return logits.argmax(dim=-1)
+    
+    def fault_tolerance_data_collator(features: List) -> Dict[str, Any]:
+    import torch
+
+    if not isinstance(features[0], Mapping):
+        features = [vars(f) for f in features]
+    first = features[0]
+    batch = {}
+
+    # Special handling for labels.
+    # Ensure that tensor is created with the correct type
+    # (it should be automatically the case, but let's make sure of it.)
+    if "label" in first and first["label"] is not None:
+        label = first["label"].item() if isinstance(first["label"], torch.Tensor) else first["label"]
+        dtype = torch.long if isinstance(label, int) else torch.float
+        batch["labels"] = torch.tensor([f["label"] for f in features], dtype=dtype)
+    elif "label_ids" in first and first["label_ids"] is not None:
+        if isinstance(first["label_ids"], torch.Tensor):
+            batch["labels"] = torch.stack([f["label_ids"] for f in features])
+        else:
+            dtype = torch.long if type(first["label_ids"][0]) is int else torch.float
+            batch["labels"] = torch.tensor([f["label_ids"] for f in features], dtype=dtype)
+
+    # Handling of all other possible keys.
+    # Again, we will use the first element to figure out which key/values are not None for this model.
+
+    try:
+        for k, v in first.items():
+            if k not in ("label", "label_ids") and v is not None and not isinstance(v, str):
+                if isinstance(v, torch.Tensor):
+                    batch[k] = torch.stack([f[k] for f in features])
+                elif isinstance(v, np.ndarray):
+                    batch[k] = torch.tensor(np.stack([f[k] for f in features]))
+                else:
+                    batch[k] = torch.tensor([f[k] for f in features])
+    except ValueError: # quick fix by simply take the first example
+        for k, v in first.items():
+            if k not in ("label", "label_ids") and v is not None and not isinstance(v, str):
+                if isinstance(v, torch.Tensor):
+                    batch[k] = torch.stack([features[0][k]] * len(features))
+                elif isinstance(v, np.ndarray):
+                    batch[k] = torch.tensor(np.stack([features[0][k]] * len(features)))
+                else:
+                    batch[k] = torch.tensor([features[0][k]] * len(features))
+
+        return batch
+    
+    # DataCollator
+    tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.pad_token_id = tokenizer.eos_token_id
+    data_collator = DataCollatorForLanguageModeling(
+        tokenizer=tokenizer,
+        mlm=False,
+    )
+    
+
     
     # Initialize our Trainer
     trainer = Trainer(
@@ -373,7 +432,7 @@ def main():
         eval_dataset=eval_dataset if training_args.do_eval else None,
         tokenizer=tokenizer,
         data_collator=data_collator,
-        compute_metrics=compute_metrics,
+        compute_metrics=compute_metrics if training_args.do_eval and not is_torch_tpu_available() else None,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics
         if training_args.do_eval and not is_torch_tpu_available() else None,
     )
@@ -389,6 +448,7 @@ def main():
         model.gradient_checkpointing_enable()
         model.enable_input_require_grads()
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
+        trainer.save_model()
         # trainer.save_model()  # Saves the tokenizer too for easy upload
 
         metrics = train_result.metrics
@@ -407,7 +467,12 @@ def main():
         metrics = trainer.evaluate()
         max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
         metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
-
+        try:
+            perplexity = math.exp(metrics["eval_loss"])
+        except OverflowError:
+            perplexity = float("inf")
+        metrics["perplexity"] = perplexity
+        
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
 
