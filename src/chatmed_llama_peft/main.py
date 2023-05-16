@@ -41,7 +41,6 @@ from transformers import (
     DataCollatorForLanguageModeling,
     DataCollatorForSeq2Seq,
     HfArgumentParser,
-    Trainer,
     TrainingArguments,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
@@ -59,7 +58,11 @@ from transformers import (
     LlamaForCausalLM,
 )
 
+from src.chatmed_llama_peft.callback import SavePeftModelCallback
+from src.chatmed_llama_peft.trainer import Trainer
 from src.chatmed_llama_peft.arguments import ModelArguments, DataTrainingArguments
+from src.chatmed_llama_peft.instruction import TASK_TO_INSTRUCTION
+
 
 from peft import PeftModel, LoraConfig, TaskType, get_peft_model, get_peft_model_state_dict
 
@@ -85,7 +88,7 @@ def main():
         datefmt="%m/%d/%Y %H:%M:%S",
         handlers=[logging.StreamHandler(sys.stdout)],
     )
-
+        
     if training_args.should_log:
         # The default of training_args.log_level is passive, so we set log level at info here to have that default.
         transformers.utils.logging.set_verbosity_info()
@@ -126,12 +129,6 @@ def main():
         use_auth_token=True if model_args.use_auth_token else None,
     )
     # print("raw_datasets: ", raw_datasets)
-
-    # Load pretrained model and tokenizer
-    # config = AutoConfig.from_pretrained(
-    #     model_args.model_name_or_path,
-    #     trust_remote_code=True
-    # )
     
     config = LlamaConfig.from_pretrained(
         model_args.model_name_or_path,
@@ -210,21 +207,47 @@ def main():
     prompt_column = data_args.prompt_column
     response_column = data_args.response_column
     history_column = data_args.history_column
+
+
+    def generate_prompt(instruction, data):
+        return f"""### 指令:\n{instruction}\n### 输入:\n{data[prompt_column]}\n### 输出:\n{tokenizer.bos_token + data[response_column] + tokenizer.eos_token}
+        """
+        
+    def tokenize(prompt, add_eos_token=True):
+        result = tokenizer(
+            prompt,
+            truncation=True,
+            max_length=data_args.block_size,
+            padding=False,
+            return_tensors=None,
+        )
+        if (
+            result["input_ids"][-1] != tokenizer.eos_token_id
+            and len(result["input_ids"]) < data_args.block_size
+            and add_eos_token
+        ):
+            result["input_ids"].append(tokenizer.eos_token_id)
+            result["attention_mask"].append(1)
     
-    # Temporarily set max_target_length for training.
-    max_target_length = data_args.max_target_length
-
-    def preprocess_function(examples):
-        return tokenizer([x + y for x, y in zip(examples[prompt_column], examples[response_column])])
-
+        result["labels"] = result["input_ids"].copy()
+ 
+        return result
+    
+    def preprocess_function(data_point):
+        # instruction = TASK_TO_INSTRUCTION[data_point['task_type']]
+        instruction = TASK_TO_INSTRUCTION[data_point['task_dataset']]
+        full_prompt = generate_prompt(instruction, data_point)
+        tokenized_full_prompt = tokenize(full_prompt)
+        return tokenized_full_prompt
+    
+    
     tokenized_datasets = raw_datasets.map(
         preprocess_function,
-        batched=True,
+        # batched=True,
         num_proc=data_args.preprocessing_num_workers,
         remove_columns=column_names,
-        load_from_cache_file=False,
+        load_from_cache_file=True,
     )
-    
     
     if data_args.block_size is None:
         block_size = tokenizer.model_max_length
@@ -271,7 +294,7 @@ def main():
             group_texts,
             batched=True,
             num_proc=data_args.preprocessing_num_workers,
-            load_from_cache_file=not data_args.overwrite_cache,
+            # load_from_cache_file=not data_args.overwrite_cache,
         )
         logger.info("Grouping texts together")
 
@@ -280,7 +303,7 @@ def main():
             single_texts,
             batched=True,
             num_proc=data_args.preprocessing_num_workers,
-            load_from_cache_file=not data_args.overwrite_cache,
+            # load_from_cache_file=not data_args.overwrite_cache,
         )
         logger.info("Grouping texts into single entries")
     
@@ -298,11 +321,10 @@ def main():
         if data_args.max_train_samples is not None:
             max_train_samples = min(len(train_dataset), data_args.max_train_samples)
             train_dataset = train_dataset.select(range(max_train_samples))
-        # print_dataset_example(train_dataset[0])
+        print_dataset_example(train_dataset[0])
         # print_dataset_example(train_dataset[1])
 
     if training_args.do_eval:
-        max_target_length = data_args.val_max_target_length
         if "validation" not in lm_datasets:
             raise ValueError("--do_eval requires a validation dataset")
         eval_dataset = lm_datasets["validation"]
@@ -313,7 +335,6 @@ def main():
         # print_dataset_example(eval_dataset[1])
 
     if training_args.do_predict:
-        max_target_length = data_args.val_max_target_length
         if "test" not in lm_datasets:
             raise ValueError("--do_predict requires a test dataset")
         predict_dataset = lm_datasets["test"]
@@ -324,7 +345,6 @@ def main():
         # print_dataset_example(predict_dataset[1])
 
     
-
 
     # Metric
     def compute_metrics(eval_preds):
@@ -416,17 +436,18 @@ def main():
     # DataCollator
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.pad_token_id = tokenizer.eos_token_id
-    data_collator = DataCollatorForLanguageModeling(
-        tokenizer=tokenizer,
-        mlm=False,
-    )
-    
+    data_collator = transformers.DataCollatorForSeq2Seq(
+    tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True)
+    # TODO: 试下fault_tolerance_data_collator
 
+    # setting trainer.evaluate with model.generate()
+    training_args.predict_with_generate = True
     
     # Initialize our Trainer
     trainer = Trainer(
         model=model,
         args=training_args,
+        data_args=data_args,
         train_dataset=train_dataset if training_args.do_train else None,
         eval_dataset=eval_dataset if training_args.do_eval else None,
         tokenizer=tokenizer,
@@ -434,6 +455,7 @@ def main():
         compute_metrics=compute_metrics if training_args.do_eval and not is_torch_tpu_available() else None,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics
         if training_args.do_eval and not is_torch_tpu_available() else None,
+        callbacks=[SavePeftModelCallback],
     )
 
     # Training
@@ -447,7 +469,7 @@ def main():
         model.gradient_checkpointing_enable()
         model.enable_input_require_grads()
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
-        trainer.save_model()
+        # trainer.save_model()
         # trainer.save_model()  # Saves the tokenizer too for easy upload
 
         metrics = train_result.metrics
