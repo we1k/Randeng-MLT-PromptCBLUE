@@ -318,6 +318,7 @@ class Trainer:
         optimizers: Tuple[torch.optim.Optimizer, torch.optim.lr_scheduler.LambdaLR] = (None, None),
         preprocess_logits_for_metrics: Optional[Callable[[torch.Tensor, torch.Tensor], torch.Tensor]] = None,
         save_prefixencoder: bool = False,
+        data_args=None,
     ):
         self.save_prefixencoder = save_prefixencoder
         if args is None:
@@ -334,7 +335,7 @@ class Trainer:
         # memory metrics - must set up as early as possible
         self._memory_tracker = TrainerMemoryTracker(self.args.skip_memory_metrics)
         self._memory_tracker.start()
-
+        self.data_args = data_args
         # set the correct log level depending on the node
         log_level = args.get_process_log_level()
         logging.set_verbosity(log_level)
@@ -2076,59 +2077,66 @@ class Trainer:
         if model is None:
             model = self.model
 
-        if not os.path.isfile(os.path.join(resume_from_checkpoint, WEIGHTS_NAME)) and not os.path.isfile(
-            os.path.join(resume_from_checkpoint, WEIGHTS_INDEX_NAME)
-        ):
-            raise ValueError(f"Can't find a valid checkpoint at {resume_from_checkpoint}")
+        from peft import PeftModel, PeftModelForCausalLM
+        if isinstance(model, PeftModel):
+            logger.info(f"Loading peftmodel from {resume_from_checkpoint}.")
+            model = PeftModelForCausalLM.from_pretrained(model, os.path.join(resume_from_checkpoint, 'adapter_model'), is_trainable=True)
+            
+        else:
+            if not os.path.isfile(os.path.join(resume_from_checkpoint, WEIGHTS_NAME)) and not os.path.isfile(
+                os.path.join(resume_from_checkpoint, WEIGHTS_INDEX_NAME)
+            ):
+                raise ValueError(f"Can't find a valid checkpoint at {resume_from_checkpoint}")
 
-        logger.info(f"Loading model from {resume_from_checkpoint}.")
+            logger.info(f"Loading model from {resume_from_checkpoint}.")
 
-        if os.path.isfile(os.path.join(resume_from_checkpoint, CONFIG_NAME)):
-            config = PretrainedConfig.from_json_file(os.path.join(resume_from_checkpoint, CONFIG_NAME))
-            checkpoint_version = config.transformers_version
-            if checkpoint_version is not None and checkpoint_version != __version__:
-                logger.warning(
-                    f"You are resuming training from a checkpoint trained with {checkpoint_version} of "
-                    f"Transformers but your current version is {__version__}. This is not recommended and could "
-                    "yield to errors or unwanted behaviors."
-                )
-
-        if os.path.isfile(os.path.join(resume_from_checkpoint, WEIGHTS_NAME)):
-            # If the model is on the GPU, it still works!
-            if is_sagemaker_mp_enabled():
-                if os.path.isfile(os.path.join(resume_from_checkpoint, "user_content.pt")):
-                    # If the 'user_content.pt' file exists, load with the new smp api.
-                    # Checkpoint must have been saved with the new smp api.
-                    smp.resume_from_checkpoint(
-                        path=resume_from_checkpoint, tag=WEIGHTS_NAME, partial=False, load_optimizer=False
+            
+            if os.path.isfile(os.path.join(resume_from_checkpoint, CONFIG_NAME)):
+                config = PretrainedConfig.from_json_file(os.path.join(resume_from_checkpoint, CONFIG_NAME))
+                checkpoint_version = config.transformers_version
+                if checkpoint_version is not None and checkpoint_version != __version__:
+                    logger.warning(
+                        f"You are resuming training from a checkpoint trained with {checkpoint_version} of "
+                        f"Transformers but your current version is {__version__}. This is not recommended and could "
+                        "yield to errors or unwanted behaviors."
                     )
-                else:
-                    # If the 'user_content.pt' file does NOT exist, load with the old smp api.
-                    # Checkpoint must have been saved with the old smp api.
-                    if hasattr(self.args, "fp16") and self.args.fp16 is True:
-                        logger.warning(
-                            "Enabling FP16 and loading from smp < 1.10 checkpoint together is not suppported."
+
+            if os.path.isfile(os.path.join(resume_from_checkpoint, WEIGHTS_NAME)):
+                # If the model is on the GPU, it still works!
+                if is_sagemaker_mp_enabled():
+                    if os.path.isfile(os.path.join(resume_from_checkpoint, "user_content.pt")):
+                        # If the 'user_content.pt' file exists, load with the new smp api.
+                        # Checkpoint must have been saved with the new smp api.
+                        smp.resume_from_checkpoint(
+                            path=resume_from_checkpoint, tag=WEIGHTS_NAME, partial=False, load_optimizer=False
                         )
+                    else:
+                        # If the 'user_content.pt' file does NOT exist, load with the old smp api.
+                        # Checkpoint must have been saved with the old smp api.
+                        if hasattr(self.args, "fp16") and self.args.fp16 is True:
+                            logger.warning(
+                                "Enabling FP16 and loading from smp < 1.10 checkpoint together is not suppported."
+                            )
+                        state_dict = torch.load(os.path.join(resume_from_checkpoint, WEIGHTS_NAME), map_location="cpu")
+                        # Required for smp to not auto-translate state_dict from hf to smp (is already smp).
+                        state_dict["_smp_is_partial"] = False
+                        load_result = model.load_state_dict(state_dict, strict=True)
+                        # release memory
+                        del state_dict
+                else:
+                    # We load the model state dict on the CPU to avoid an OOM error.
                     state_dict = torch.load(os.path.join(resume_from_checkpoint, WEIGHTS_NAME), map_location="cpu")
-                    # Required for smp to not auto-translate state_dict from hf to smp (is already smp).
-                    state_dict["_smp_is_partial"] = False
-                    load_result = model.load_state_dict(state_dict, strict=True)
+                    # workaround for FSDP bug https://github.com/pytorch/pytorch/issues/82963
+                    # which takes *args instead of **kwargs
+                    load_result = model.load_state_dict(state_dict, False)
                     # release memory
                     del state_dict
+                    self._issue_warnings_after_load(load_result)
             else:
-                # We load the model state dict on the CPU to avoid an OOM error.
-                state_dict = torch.load(os.path.join(resume_from_checkpoint, WEIGHTS_NAME), map_location="cpu")
-                # workaround for FSDP bug https://github.com/pytorch/pytorch/issues/82963
-                # which takes *args instead of **kwargs
-                load_result = model.load_state_dict(state_dict, False)
-                # release memory
-                del state_dict
-                self._issue_warnings_after_load(load_result)
-        else:
-            # We load the sharded checkpoint
-            load_result = load_sharded_checkpoint(model, resume_from_checkpoint, strict=is_sagemaker_mp_enabled())
-            if not is_sagemaker_mp_enabled():
-                self._issue_warnings_after_load(load_result)
+                # We load the sharded checkpoint
+                load_result = load_sharded_checkpoint(model, resume_from_checkpoint, strict=is_sagemaker_mp_enabled())
+                if not is_sagemaker_mp_enabled():
+                    self._issue_warnings_after_load(load_result)
 
     def _load_best_model(self):
         logger.info(f"Loading best model from {self.state.best_model_checkpoint} (score: {self.state.best_metric}).")
@@ -3300,108 +3308,81 @@ class Trainer:
         new_tensor[:, : old_size[1]] = tensor
         return new_tensor
 
+
+    def _pad_tensors_to_max_len(self, tensor, max_length):
+        # If PAD token is not defined at least EOS token has to be defined
+        pad_token_id = self.tokenizer.pad_token_id
+
+        if pad_token_id is None:
+            raise ValueError(
+                "Make sure that either `config.pad_token_id` or `config.eos_token_id` is defined if tensor has to be"
+                f" padded to `max_length`={max_length}"
+            )
+
+        padded_tensor = pad_token_id * torch.ones(
+            (tensor.shape[0], max_length), dtype=tensor.dtype, device=tensor.device
+        )
+        padded_tensor[:, : tensor.shape[-1]] = tensor
+        return padded_tensor
+    
     def prediction_step(
         self,
         model: nn.Module,
         inputs: Dict[str, Union[torch.Tensor, Any]],
         prediction_loss_only: bool,
         ignore_keys: Optional[List[str]] = None,
-    ) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+    ) -> Tuple[Optional[float], Optional[torch.Tensor], Optional[torch.Tensor]]:
         """
-        Perform an evaluation step on `model` using `inputs`.
+        Perform an evaluation step on :obj:`model` using obj:`inputs`.
 
         Subclass and override to inject custom behavior.
 
         Args:
-            model (`nn.Module`):
+            model (:obj:`nn.Module`):
                 The model to evaluate.
-            inputs (`Dict[str, Union[torch.Tensor, Any]]`):
+            inputs (:obj:`Dict[str, Union[torch.Tensor, Any]]`):
                 The inputs and targets of the model.
 
                 The dictionary will be unpacked before being fed to the model. Most models expect the targets under the
-                argument `labels`. Check your model's documentation for all accepted arguments.
-            prediction_loss_only (`bool`):
+                argument :obj:`labels`. Check your model's documentation for all accepted arguments.
+            prediction_loss_only (:obj:`bool`):
                 Whether or not to return the loss only.
-            ignore_keys (`Lst[str]`, *optional*):
-                A list of keys in the output of your model (if it is a dictionary) that should be ignored when
-                gathering predictions.
 
         Return:
-            Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]: A tuple with the loss,
-            logits and labels (each being optional).
+            Tuple[Optional[float], Optional[torch.Tensor], Optional[torch.Tensor]]:
+            A tuple with the loss, logits and labels (each being optional).
         """
-        has_labels = False if len(self.label_names) == 0 else all(inputs.get(k) is not None for k in self.label_names)
-        # For CLIP-like models capable of returning loss values.
-        # If `return_loss` is not specified or being `None` in `inputs`, we check if the default value of `return_loss`
-        # is `True` in `model.forward`.
-        return_loss = inputs.get("return_loss", None)
-        if return_loss is None:
-            return_loss = self.can_return_loss
-        loss_without_labels = True if len(self.label_names) == 0 and return_loss else False
-
         inputs = self._prepare_inputs(inputs)
-        if ignore_keys is None:
-            if hasattr(self.model, "config"):
-                ignore_keys = getattr(self.model.config, "keys_to_ignore_at_inference", [])
-            else:
-                ignore_keys = []
 
-        # labels may be popped when computing the loss (label smoothing for instance) so we grab them first.
-        if has_labels or loss_without_labels:
-            labels = nested_detach(tuple(inputs.get(name) for name in self.label_names))
-            if len(labels) == 1:
-                labels = labels[0]
-        else:
-            labels = None
+        gen_kwargs = {
+            "max_length": self.data_args.val_max_target_length, 
+            "num_beams": self.data_args.eval_beams,
+            "max_new_tokens" : self.data_args.max_new_tokens,
+        }
 
+        if self.args.predict_with_generate and not self.args.prediction_loss_only:
+            generated_tokens = self.model.generate(
+                inputs["input_ids"],
+                **gen_kwargs,
+            )
+            # in case the batch is shorter than max length, the output should be padded
+            if generated_tokens.shape[-1] < gen_kwargs["max_length"]:
+                generated_tokens = self._pad_tensors_to_max_len(generated_tokens, gen_kwargs["max_length"])
+
+        labels = inputs.pop("labels")
+        print(labels)
         with torch.no_grad():
-            if is_sagemaker_mp_enabled():
-                raw_outputs = smp_forward_only(model, inputs)
-                if has_labels or loss_without_labels:
-                    if isinstance(raw_outputs, dict):
-                        loss_mb = raw_outputs["loss"]
-                        logits_mb = tuple(v for k, v in raw_outputs.items() if k not in ignore_keys + ["loss"])
-                    else:
-                        loss_mb = raw_outputs[0]
-                        logits_mb = raw_outputs[1:]
+            # compute loss on predict data
+            loss, logits = self.compute_loss(model, inputs, labels)
 
-                    loss = loss_mb.reduce_mean().detach().cpu()
-                    logits = smp_nested_concat(logits_mb)
-                else:
-                    loss = None
-                    if isinstance(raw_outputs, dict):
-                        logits_mb = tuple(v for k, v in raw_outputs.items() if k not in ignore_keys)
-                    else:
-                        logits_mb = raw_outputs
-                    logits = smp_nested_concat(logits_mb)
-            else:
-                if has_labels or loss_without_labels:
-                    with self.compute_loss_context_manager():
-                        loss, outputs = self.compute_loss(model, inputs, return_outputs=True)
-                    loss = loss.mean().detach()
-
-                    if isinstance(outputs, dict):
-                        logits = tuple(v for k, v in outputs.items() if k not in ignore_keys + ["loss"])
-                    else:
-                        logits = outputs[1:]
-                else:
-                    loss = None
-                    with self.compute_loss_context_manager():
-                        outputs = model(**inputs)
-                    if isinstance(outputs, dict):
-                        logits = tuple(v for k, v in outputs.items() if k not in ignore_keys)
-                    else:
-                        logits = outputs
-                    # TODO: this needs to be fixed and made cleaner later.
-                    if self.args.past_index >= 0:
-                        self._past = outputs[self.args.past_index - 1]
-
-        if prediction_loss_only:
+        loss = loss.mean().detach()
+        if self.args.prediction_loss_only:
             return (loss, None, None)
 
-        logits = nested_detach(logits)
-        if len(logits) == 1:
-            logits = logits[0]
+        logits = generated_tokens if self.args.predict_with_generate else logits
+
+        if labels.shape[-1] < gen_kwargs["max_length"]:
+            labels = self._pad_tensors_to_max_len(labels, gen_kwargs["max_length"])
 
         return (loss, logits, labels)
 
@@ -3704,7 +3685,10 @@ class Trainer:
             self._past = None
 
         self.callback_handler.eval_dataloader = dataloader
-
+        
+        # TODO: change to model.generate()
+        # from transformers import LlamaForCausalLM
+        # if isinstance(model, LlamaForCausalLM):
         for step, inputs in enumerate(dataloader):
             loss, logits, labels = self.prediction_step(model, inputs, prediction_loss_only, ignore_keys=ignore_keys)
             inputs_decode = self._prepare_input(inputs["input_ids"]) if args.include_inputs_for_metrics else None
