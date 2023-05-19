@@ -13,7 +13,7 @@ lora_trainable=".*(q_proj|k_proj|down_proj|up_proj|gate_proj)"
 modules_to_save="null"
 # modules_to_save="embed_tokens,lm_head"
 lora_dropout=0.1
-LR=3e-4
+LR=1e-4
 # your_data_path="datasets/toy_examples"  # 填入数据集所在的文件夹路径
 your_data_path="datasets/PromptCBLUE"  # 填入数据集所在的文件夹路径
 your_checkpoint_path="checkpoint"  # 填入用来存储模型的路径
@@ -28,9 +28,7 @@ torchrun \
     --deepspeed ${deepspeed_config_file} \
     --fp16 \
     --do_train \
-    --do_eval \
     --train_file $your_data_path/train.json \
-    --validation_file $your_data_path/dev.json \
     --test_file $your_data_path/test.json \
     --prompt_column input \
     --response_column target \
@@ -42,12 +40,11 @@ torchrun \
     --max_source_length 700 \
     --max_target_length 196 \
     --per_device_train_batch_size 4 \
-    --per_device_eval_batch_size 2 \
     --gradient_accumulation_steps 8 \
     --max_steps 2000 \
     --logging_steps 500 \
     --save_steps 1000 \
-    --save_total_limit 2 \
+    --save_total_limit 3 \
     --learning_rate $LR \
     --lora_rank ${lora_rank} \
     --lora_alpha ${lora_alpha} \

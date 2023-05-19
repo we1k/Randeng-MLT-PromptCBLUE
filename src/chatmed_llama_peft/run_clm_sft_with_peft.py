@@ -27,12 +27,16 @@ import math
 import os
 import sys
 from dataclasses import dataclass, field
+import jieba 
+from rouge_chinese import Rouge
+from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
+
+
 from typing import Optional, List, Dict, Any, Mapping
 from pathlib import Path
 import datasets
 import json
 import torch
-from build_dataset import buid_instruction_dataset, DataCollatorForSupervisedDataset
 import transformers
 from transformers import (
     CONFIG_MAPPING,
@@ -52,9 +56,12 @@ from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
 from transformers.utils.versions import require_version
 
+sys.path.append("./")
+os.environ['CUDA_VISIBLE_DEVICES']='0,1,2,3'
+
+from src.chatmed_llama_peft.build_dataset import build_instruction_dataset, DataCollatorForSupervisedDataset
+from src.chatmed_llama_peft.callback import SavePeftModelCallback
 from peft import LoraConfig, TaskType, get_peft_model, PeftModel, get_peft_model_state_dict
-
-
 
 
 IGNORE_INDEX = -100
@@ -80,14 +87,6 @@ class ModelArguments:
         metadata={
             "help": (
                 "The model checkpoint for weights initialization.Don't set if you want to train a model from scratch."
-            )
-        },
-    )
-    tokenizer_name_or_path: Optional[str] = field(
-        default=None,
-        metadata={
-            "help": (
-                "The tokenizer for weights initialization.Don't set if you want to train a model from scratch."
             )
         },
     )
@@ -180,7 +179,7 @@ class DataTrainingArguments:
     )
     data_cache_dir: Optional[str] = field(default=None, metadata={"help": "The datasets processed stored"})
 
-    max_seq_length: Optional[int] = field(default=512)
+    max_seq_length: Optional[int] = field(default=1024)
 
 @dataclass
 class MyTrainingArguments(TrainingArguments):
@@ -204,7 +203,6 @@ def main():
     else:
         model_args, data_args, training_args = parser.parse_args_into_dataclasses()
 
-    send_example_telemetry("run_clm", model_args, data_args)
 
     # Setup logging
     logging.basicConfig(format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",datefmt="%m/%d/%Y %H:%M:%S",
@@ -246,6 +244,7 @@ def main():
             )
 
     # Set seed before initializing model.
+    training_args.seed = 42
     set_seed(training_args.seed)
 
 
@@ -254,9 +253,8 @@ def main():
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
     }
-    if model_args.config_name:
-        config = AutoConfig.from_pretrained(model_args.config_name, **config_kwargs)
-    elif model_args.model_name_or_path:
+
+    if model_args.model_name_or_path:
         config = AutoConfig.from_pretrained(model_args.model_name_or_path, **config_kwargs)
     else:
         config = CONFIG_MAPPING[model_args.model_type]()
@@ -272,10 +270,8 @@ def main():
         "revision": model_args.model_revision,
         "use_auth_token": True if model_args.use_auth_token else None,
     }
-    if model_args.tokenizer_name:
-        tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs)
-    elif model_args.tokenizer_name_or_path:
-        tokenizer = LlamaTokenizer.from_pretrained(model_args.tokenizer_name_or_path, **tokenizer_kwargs)
+    if model_args.model_name_or_path:
+        tokenizer = LlamaTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
     else:
         raise ValueError(
             "You are instantiating a new tokenizer from scratch. This is not supported by this script."
@@ -289,16 +285,15 @@ def main():
             model=None,)
 
     data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
-    eval_dataset=None
+    eval_dataset = None
     train_dataset = None
 
 
     if training_args.do_train:
         with training_args.main_process_first(desc="loading and tokenization"):
-            path = Path(data_args.dataset_dir)
-            files = [os.path.join(path,file.name) for file in path.glob("*.json")]
+            files = [data_args.train_file]
             logger.info(f"training files: {' '.join(files)}")
-            train_dataset = buid_instruction_dataset(
+            train_dataset = build_instruction_dataset(
                 data_path=files, 
                 tokenizer=tokenizer, 
                 max_seq_length=data_args.max_seq_length,
@@ -310,8 +305,8 @@ def main():
     if training_args.do_eval:
         with training_args.main_process_first(desc="loading and tokenization"):
             files = [data_args.validation_file]
-            logger.info(f"training files: {' '.join(files)}")
-            eval_dataset = buid_instruction_dataset(
+            logger.info(f"validation files: {' '.join(files)}")
+            eval_dataset = build_instruction_dataset(
                 data_path=files, 
                 tokenizer=tokenizer, 
                 max_seq_length=data_args.max_seq_length,
@@ -336,7 +331,6 @@ def main():
             revision=model_args.model_revision,
             use_auth_token=True if model_args.use_auth_token else None,
             torch_dtype=torch_dtype,
-            low_cpu_mem_usage=True
         )
 
     else:
@@ -381,15 +375,60 @@ def main():
         lambda self, *_, **__: get_peft_model_state_dict(self, old_state_dict())
     ).__get__(model, type(model))
 
+    print(model.device)
+    # Metric
+    def compute_metrics(eval_preds):
+        preds, labels = eval_preds
+        if isinstance(preds, tuple):
+            preds = preds[0]
+        if data_args.ignore_pad_token_for_loss:
+            # Replace -100 in the labels as we can't decode them.
+            preds = np.where(preds != -100, preds, tokenizer.pad_token_id)
+            labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
 
+        score_dict = {
+            "rouge-1": [],
+            "rouge-2": [],
+            "rouge-l": [],
+            "bleu-4": []
+        }
+        for pred, label in zip(decoded_preds, decoded_labels):
+            hypothesis = list(jieba.cut(pred))
+            reference = list(jieba.cut(label))
+            rouge = Rouge()
+            scores = rouge.get_scores(' '.join(hypothesis) , ' '.join(reference))
+            result = scores[0]
+            
+            for k, v in result.items():
+                score_dict[k].append(round(v["f"] * 100, 4))
+            bleu_score = sentence_bleu([list(label)], list(pred), smoothing_function=SmoothingFunction().method3)
+            score_dict["bleu-4"].append(round(bleu_score * 100, 4))
+
+        for k, v in score_dict.items():
+            score_dict[k] = float(np.mean(v))
+        return score_dict
+
+    def preprocess_logits_for_metrics(logits, labels):
+        if isinstance(logits, tuple):
+            # Depending on the model and config, logits may contain extra tensors,
+            # like past_key_values, but logits always come first
+            logits = logits[0]
+        return logits.argmax(dim=-1)
+    
     # Initialize our Trainer
     trainer = Trainer(
         model=model,
         args=training_args,
-        train_dataset=train_dataset,
-        eval_dataset=eval_dataset,
+        train_dataset=train_dataset if training_args.do_train else None,
+        eval_dataset=eval_dataset if training_args.do_eval else None,
         tokenizer=tokenizer,
         data_collator=data_collator,
+        compute_metrics=compute_metrics if training_args.do_eval else None,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics
+        if training_args.do_eval else None,
+        callbacks=[SavePeftModelCallback],
     )
 
     # Training
@@ -399,8 +438,10 @@ def main():
             checkpoint = training_args.resume_from_checkpoint
         elif last_checkpoint is not None:
             checkpoint = last_checkpoint
+        model.gradient_checkpointing_enable()
+        model.enable_input_require_grads()
         train_result = trainer.train(resume_from_checkpoint=checkpoint)
-        trainer.save_model()  # Saves the tokenizer too for easy upload
+        # trainer.save_model()  # Saves the tokenizer too for easy upload
 
         metrics = train_result.metrics
 

@@ -58,6 +58,7 @@ from transformers import (
     LlamaForCausalLM,
 )
 
+from src.chatmed_llama_peft.build_dataset import build_instruction_dataset, DataCollatorForSupervisedDataset
 from src.chatmed_llama_peft.callback import SavePeftModelCallback
 from src.chatmed_llama_peft.trainer import Trainer
 from src.chatmed_llama_peft.arguments import ModelArguments, DataTrainingArguments
@@ -195,65 +196,12 @@ def main():
         model = model.quantize(model_args.quantization_bit)
 
 
-    prefix = data_args.source_prefix if data_args.source_prefix is not None else ""
-
-    # Preprocessing the datasets.
-    # We need to tokenize inputs and targets.
-    if training_args.do_train:
-        column_names = raw_datasets["train"].column_names
-    elif training_args.do_eval:
-        column_names = raw_datasets["validation"].column_names
-    elif training_args.do_predict:
-        column_names = raw_datasets["test"].column_names
-    else:
-        logger.info("There is nothing to do. Please pass `do_train`, `do_eval` and/or `do_predict`.")
-        return
-
+    
     # Get the column names for input/target.
-    prompt_column = data_args.prompt_column
-    response_column = data_args.response_column
-    history_column = data_args.history_column
-
-
-    def generate_prompt(instruction, data):
-        return f"""### 指令:\n{instruction}\n### 输入:\n{data[prompt_column]}\n### 输出:\n{tokenizer.bos_token + data[response_column] + tokenizer.eos_token}
-        """
-        
-    def tokenize(prompt, add_eos_token=True):
-        result = tokenizer(
-            prompt,
-            truncation=True,
-            max_length=data_args.block_size,
-            padding=False,
-            return_tensors=None,
-        )
-        if (
-            result["input_ids"][-1] != tokenizer.eos_token_id
-            and len(result["input_ids"]) < data_args.block_size
-            and add_eos_token
-        ):
-            result["input_ids"].append(tokenizer.eos_token_id)
-            result["attention_mask"].append(1)
+    data_collator = DataCollatorForSupervisedDataset(tokenizer=tokenizer)
+    eval_dataset = None
+    train_dataset = None
     
-        result["labels"] = result["input_ids"].copy()
- 
-        return result
-    
-    def preprocess_function(data_point):
-        # instruction = TASK_TO_INSTRUCTION[data_point['task_type']]
-        instruction = TASK_TO_INSTRUCTION[data_point['task_dataset']]
-        full_prompt = generate_prompt(instruction, data_point)
-        tokenized_full_prompt = tokenize(full_prompt)
-        return tokenized_full_prompt
-    
-    
-    tokenized_datasets = raw_datasets.map(
-        preprocess_function,
-        # batched=True,
-        num_proc=data_args.preprocessing_num_workers,
-        remove_columns=column_names,
-        load_from_cache_file=True,
-    )
     
     if data_args.block_size is None:
         block_size = tokenizer.model_max_length
@@ -270,48 +218,35 @@ def main():
                 f"({tokenizer.model_max_length}). Using block_size={tokenizer.model_max_length}."
             )
         block_size = min(data_args.block_size, tokenizer.model_max_length)
-
-    # Main data processing function that will make each entry its own in the dataset
-    def single_texts(examples):
-        result = examples
-        result["labels"] = examples["input_ids"].copy()
-        return result
-
-    # Main data processing function that will concatenate all texts from our dataset and generate chunks of block_size.
-    def group_texts(examples):
-        # Concatenate all texts.
-        concatenated_examples = {
-            k: sum(examples[k], []) for k in examples.keys()}
-        total_length = len(concatenated_examples[list(examples.keys())[0]])
-        # We drop the small remainder, we could add padding if the model supported it instead of this drop, you can
-        # customize this part to your needs.
-        total_length = (total_length // block_size) * block_size
-        # Split by chunks of max_len.
-        result = {
-            k: [t[i: i + block_size]
-                for i in range(0, total_length, block_size)]
-            for k, t in concatenated_examples.items()
-        }
-        result["labels"] = result["input_ids"].copy()
-        return result
-
-    if data_args.group_texts:
-        lm_datasets = tokenized_datasets.map(
-            group_texts,
-            batched=True,
-            num_proc=data_args.preprocessing_num_workers,
-            # load_from_cache_file=not data_args.overwrite_cache,
-        )
-        logger.info("Grouping texts together")
-
-    else:
-        lm_datasets = tokenized_datasets.map(
-            single_texts,
-            batched=True,
-            num_proc=data_args.preprocessing_num_workers,
-            # load_from_cache_file=not data_args.overwrite_cache,
-        )
-        logger.info("Grouping texts into single entries")
+    
+    if training_args.do_train:
+        with training_args.main_process_first(desc="loading and tokenization"):
+            files = [data_args.train_file]
+            logger.info(f"training files: {' '.join(files)}")
+            train_dataset = build_instruction_dataset(
+                data_path=files, 
+                tokenizer=tokenizer, 
+                max_seq_length=data_args.block_size,
+                data_cache_dir = None, 
+                preprocessing_num_workers = data_args.preprocessing_num_workers)
+        logger.info(f"Num train_samples  {len(train_dataset)}")
+        logger.info("training example:")
+        logger.info(tokenizer.decode(train_dataset[0]['input_ids']))
+    if training_args.do_eval:
+        with training_args.main_process_first(desc="loading and tokenization"):
+            files = [data_args.validation_file]
+            logger.info(f"validation files: {' '.join(files)}")
+            eval_dataset = build_instruction_dataset(
+                data_path=files, 
+                tokenizer=tokenizer, 
+                max_seq_length=data_args.block_size,
+                data_cache_dir = None, 
+                preprocessing_num_workers = data_args.preprocessing_num_workers)
+        logger.info(f"Num eval_samples  {len(eval_dataset)}")
+        logger.info("eval example:")
+        logger.info(tokenizer.decode(eval_dataset[0]['input_ids']))
+        
+    
     
     def print_dataset_example(example):
         print("input_ids",example["input_ids"])
@@ -319,37 +254,6 @@ def main():
         print("label_ids", len(example["labels"]))
         labels = list(map(lambda x: tokenizer.pad_token_id if x == -100 else x, example['labels']))
         print("labels", tokenizer.decode(labels))
-        
-    if training_args.do_train:
-        if "train" not in lm_datasets:
-            raise ValueError("--do_train requires a train dataset")
-        train_dataset = lm_datasets["train"]
-        if data_args.max_train_samples is not None:
-            max_train_samples = min(len(train_dataset), data_args.max_train_samples)
-            train_dataset = train_dataset.select(range(max_train_samples))
-        print_dataset_example(train_dataset[0])
-        # print_dataset_example(train_dataset[1])
-
-    if training_args.do_eval:
-        if "validation" not in lm_datasets:
-            raise ValueError("--do_eval requires a validation dataset")
-        eval_dataset = lm_datasets["validation"]
-        if data_args.max_eval_samples is not None:
-            max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
-            eval_dataset = eval_dataset.select(range(max_eval_samples))
-        # print_dataset_example(eval_dataset[0])
-        # print_dataset_example(eval_dataset[1])
-
-    if training_args.do_predict:
-        if "test" not in lm_datasets:
-            raise ValueError("--do_predict requires a test dataset")
-        predict_dataset = lm_datasets["test"]
-        if data_args.max_predict_samples is not None:
-            max_predict_samples = min(len(predict_dataset), data_args.max_predict_samples)
-            predict_dataset = predict_dataset.select(range(max_predict_samples))
-        # print_dataset_example(predict_dataset[0])
-        # print_dataset_example(predict_dataset[1])
-
     
 
     # Metric
@@ -439,47 +343,27 @@ def main():
 
         return batch
     
-    # DataCollator
-    tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.pad_token_id = tokenizer.eos_token_id
-    data_collator = transformers.DataCollatorForSeq2Seq(
-    tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True)
     # TODO: 试下fault_tolerance_data_collator
-
     # setting trainer.evaluate with model.generate()
     training_args.predict_with_generate = True
     task = data_args.task_name
     data_args.max_new_tokens = TASK_TO_MAX_NEW_TOKENS[task]
     
     # Initialize our Trainer
-    if training_args.do_train:
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            data_args=data_args,
-            train_dataset=train_dataset if training_args.do_train else None,
-            eval_dataset=eval_dataset if training_args.do_eval else None,
-            tokenizer=tokenizer,
-            data_collator=data_collator,
-            compute_metrics=compute_metrics if training_args.do_eval and not is_torch_tpu_available() else None,
-            preprocess_logits_for_metrics=preprocess_logits_for_metrics
-            if training_args.do_eval and not is_torch_tpu_available() else None,
-            callbacks=[SavePeftModelCallback],
-        )
-    elif training_args.do_predict:
-        trainer = Seq2SeqTrainer(
-            model=model,
-            args=training_args,
-            data_args=data_args,
-            test_dataset=test_dataset if training_args.do_predict else None,
-            tokenizer=tokenizer,
-            data_collator=data_collator,
-            preprocess_logits_for_metrics=preprocess_logits_for_metrics
-            if training_args.do_predict and not is_torch_tpu_available() else None,
-        )
-    else:
-        raise ValueError("Must pass do_train or do_predict")
-    
+    trainer = Trainer(
+        model=model,
+        args=training_args,
+        data_args=data_args,
+        train_dataset=train_dataset if training_args.do_train else None,
+        eval_dataset=eval_dataset if training_args.do_eval else None,
+        tokenizer=tokenizer,
+        data_collator=data_collator,
+        compute_metrics=compute_metrics if training_args.do_eval and not is_torch_tpu_available() else None,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics
+        if training_args.do_eval and not is_torch_tpu_available() else None,
+        callbacks=[SavePeftModelCallback],
+    )
+
 
     # Training
     if training_args.do_train:
@@ -520,49 +404,49 @@ def main():
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
 
-    if training_args.do_predict:
-        logger.info("*** Predict ***")
+    # if training_args.do_predict:
+    #     logger.info("*** Predict ***")
 
-        # 读取原test file
-        list_test_samples = []
-        with open(data_args.test_file, "r", encoding="utf-8") as f:
-            for line in f:
-                line = json.loads(line)
-                list_test_samples.append(line)
+    #     # 读取原test file
+    #     list_test_samples = []
+    #     with open(data_args.test_file, "r", encoding="utf-8") as f:
+    #         for line in f:
+    #             line = json.loads(line)
+    #             list_test_samples.append(line)
 
-        predict_results = trainer.predict(
-            predict_dataset,
-        )
-        metrics = predict_results.metrics
-        print(metrics)
-        max_predict_samples = (
-            data_args.max_predict_samples if data_args.max_predict_samples is not None else len(predict_dataset)
-        )
-        metrics["predict_samples"] = min(max_predict_samples, len(predict_dataset))
+    #     predict_results = trainer.predict(
+    #         predict_dataset,
+    #     )
+    #     metrics = predict_results.metrics
+    #     print(metrics)
+    #     max_predict_samples = (
+    #         data_args.max_predict_samples if data_args.max_predict_samples is not None else len(predict_dataset)
+    #     )
+    #     metrics["predict_samples"] = min(max_predict_samples, len(predict_dataset))
 
-        trainer.log_metrics("predict", metrics)
-        trainer.save_metrics("predict", metrics)
+    #     trainer.log_metrics("predict", metrics)
+    #     trainer.save_metrics("predict", metrics)
 
-        if trainer.is_world_process_zero():
-            if training_args.predict_with_generate:
-                predictions = tokenizer.batch_decode(
-                    predict_results.predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
-                )
-                predictions = [pred.strip() for pred in predictions]
-                labels = tokenizer.batch_decode(
-                    predict_results.label_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True
-                )
-                labels = [label.strip() for label in labels]
-                assert len(labels) == len(list_test_samples)
+    #     if trainer.is_world_process_zero():
+    #         if training_args.predict_with_generate:
+    #             predictions = tokenizer.batch_decode(
+    #                 predict_results.predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
+    #             )
+    #             predictions = [pred.strip() for pred in predictions]
+    #             labels = tokenizer.batch_decode(
+    #                 predict_results.label_ids, skip_special_tokens=True, clean_up_tokenization_spaces=True
+    #             )
+    #             labels = [label.strip() for label in labels]
+    #             assert len(labels) == len(list_test_samples)
 
-                output_prediction_file = os.path.join(training_args.output_dir, "test_predictions.json")
+    #             output_prediction_file = os.path.join(training_args.output_dir, "test_predictions.json")
 
-                with open(output_prediction_file, "w", encoding="utf-8") as writer:
-                    for idx, (p, l) in enumerate(zip(predictions, labels)):
-                        samp = list_test_samples[idx]
-                        samp["target"] = p
-                        res = json.dumps(samp, ensure_ascii=False)
-                        writer.write(f"{res}\n")
+    #             with open(output_prediction_file, "w", encoding="utf-8") as writer:
+    #                 for idx, (p, l) in enumerate(zip(predictions, labels)):
+    #                     samp = list_test_samples[idx]
+    #                     samp["target"] = p
+    #                     res = json.dumps(samp, ensure_ascii=False)
+    #                     writer.write(f"{res}\n")
 
     return results
 
