@@ -1,0 +1,8 @@
+/datasets/
+/model/
+pics/
+checkpoint/
+/data/
+/chinese-llama-alpaca-plus-lora-7b
+/wandb
+*.pyc

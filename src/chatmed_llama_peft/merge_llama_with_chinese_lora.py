@@ -6,6 +6,7 @@ python medical_prompts/src/ft_llama_lora/merge_llama_with_chinese_lora.py \
     --output_type huggingface \
     --output_dir ./resources/chinese-llama-alpaca-plus-lora-7b
 """
+
 import argparse
 import json
 import os

@@ -1,0 +1,32 @@
+3. 对比加载adapter和直接加载state dict
+
+测试trainer.py中 _load_from_checkpoint是否可行
+
+4. callback + compute_metrics
+
+换下base_model 继续训练 (seq2seq model)
+换下data_collator
+修改compute_metric
+
+CAUSAL_LM也可以 model.generate()
+
+训练的CPrompt 5000 放在dev里面了
+
+post_process 替换成label?
+
+生成result.json
+
+
+
+hard task: "CHIP-MDCFNPC" "IMCS-V2-MRG"
+
+# reconstruct dataset : 
+
+# TODO:
+更新数据集
+event_extraction : CHIP-CDEE 删除target第一行
+report generation : IMCS-V2-MRG  删除target第一行
+attr_cls : IMCS-V2-SR  删除target第一行 : 
+           "CHIP-MDCFNPC" 删除target第一行, 替换映射
+
+

@@ -49,7 +49,7 @@ generation_config = dict(
 )
 
 while True:
-    query = input()
+    query = input('input:')
     with torch.no_grad():
         device = torch.device("cuda")
         inputs = tokenizer(query, return_tensors="pt", add_special_tokens=False)  # add_special_tokens=False ?

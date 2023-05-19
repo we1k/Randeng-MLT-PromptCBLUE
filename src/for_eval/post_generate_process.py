@@ -241,6 +241,7 @@ def process_generated_results(pred_file):
                 # if answer_str not in answer_choices:
                 #     answer_str = "不相关"
 
+                # TODO: 添加 verbalizer mapping               
                 structured_output[task_dataset].append(
                     {
                         "sample_id": sample_id_,

@@ -76,7 +76,9 @@ class DataTrainingArguments:
     """
 
     lang: Optional[str] = field(default=None, metadata={"help": "Language id for summarization."})
-
+    task_name: Optional[str] = field(
+        default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
+    )
     dataset_name: Optional[str] = field(
         default=None, metadata={"help": "The name of the dataset to use (via the datasets library)."}
     )
@@ -119,6 +121,22 @@ class DataTrainingArguments:
         default=None,
         metadata={"help": "The number of processes to use for the preprocessing."},
     )
+    block_size: Optional[int] = field(
+        default=1024,
+        metadata={
+            "help": (
+                "chunk for Causal LM"
+            )
+        },
+    )
+    group_texts: Optional[bool] = field(
+        default=False,
+        metadata={
+            "help": (
+                "Group text to save GPU utilities, but may lower performance "
+            )
+        },
+    )
     max_source_length: Optional[int] = field(
         default=1024,
         metadata={
@@ -129,7 +147,7 @@ class DataTrainingArguments:
         },
     )
     max_target_length: Optional[int] = field(
-        default=128,
+        default=1024,
         metadata={
             "help": (
                 "The maximum total sequence length for target text after tokenization. Sequences longer "
@@ -137,8 +155,18 @@ class DataTrainingArguments:
             )
         },
     )
+    max_new_tokens: Optional[int] = field(
+        default=1024,
+        metadata={
+            "help": (
+                "The maximum total sequence length for target text after tokenization. Sequences longer "
+                "than this will be truncated, sequences shorter will be padded."
+            )
+        },
+    )
+    
     val_max_target_length: Optional[int] = field(
-        default=None,
+        default=1024,
         metadata={
             "help": (
                 "The maximum total sequence length for validation target text after tokenization. Sequences longer "

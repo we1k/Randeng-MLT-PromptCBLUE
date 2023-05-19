@@ -2697,6 +2697,7 @@ class Trainer:
                 loss = self.label_smoother(outputs, labels)
         else:
             if isinstance(outputs, dict) and "loss" not in outputs:
+                outputs["loss"] = 0.0
                 raise ValueError(
                     "The model did not return a loss from the inputs, only the following keys: "
                     f"{','.join(outputs.keys())}. For reference, the inputs it received are {','.join(inputs.keys())}."
@@ -3356,26 +3357,27 @@ class Trainer:
 
         gen_kwargs = {
             "max_length": self.data_args.val_max_target_length, 
-            "num_beams": self.data_args.eval_beams,
+            # "num_beams": self.data_args.num_beams,
             "max_new_tokens" : self.data_args.max_new_tokens,
-        }
+        }   
 
+        inputs.update(gen_kwargs)
         if self.args.predict_with_generate and not self.args.prediction_loss_only:
             generated_tokens = self.model.generate(
-                inputs["input_ids"],
-                **gen_kwargs,
+                **inputs,
             )
             # in case the batch is shorter than max length, the output should be padded
             if generated_tokens.shape[-1] < gen_kwargs["max_length"]:
                 generated_tokens = self._pad_tensors_to_max_len(generated_tokens, gen_kwargs["max_length"])
 
-        labels = inputs.pop("labels")
-        print(labels)
-        with torch.no_grad():
-            # compute loss on predict data
-            loss, logits = self.compute_loss(model, inputs, labels)
 
-        loss = loss.mean().detach()
+        labels = inputs.pop("labels")
+        loss = 0.0
+        # with torch.no_grad():
+        #     # compute loss on predict data
+        #     loss, logits = self.compute_loss(model, inputs, labels)
+        
+        # loss = loss.mean().detach()
         if self.args.prediction_loss_only:
             return (loss, None, None)
 

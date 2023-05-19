@@ -61,10 +61,10 @@ from transformers import (
 from src.chatmed_llama_peft.callback import SavePeftModelCallback
 from src.chatmed_llama_peft.trainer import Trainer
 from src.chatmed_llama_peft.arguments import ModelArguments, DataTrainingArguments
-from src.chatmed_llama_peft.instruction import TASK_TO_INSTRUCTION
+from src.chatmed_llama_peft.instruction import TASK_TO_INSTRUCTION, TASK_TO_MAX_NEW_TOKENS
 
 
-from peft import PeftModel, LoraConfig, TaskType, get_peft_model, get_peft_model_state_dict
+from peft import PeftModel, LoraConfig, TaskType, PeftModelForCausalLM, get_peft_model, get_peft_model_state_dict
 
 logger = logging.getLogger(__name__)
 
@@ -144,16 +144,22 @@ def main():
     model = LlamaForCausalLM.from_pretrained(
             model_args.model_name_or_path,
             config=config,
-    ).half().cuda()
+    ).cuda()
     
+    if training_args.do_train:
+        model = model.half()
     
+
     # for n, p in model.named_parameters():
     #     print(n, p.requires_grad)
 
     # model.resize_token_embeddings(len(tokenizer))
     if model_args.peft_path is not None:
         logger.info("Peft from pre-trained model")
-        model = PeftModel.from_pretrained(model, model_args.peft_path)
+        logger.info("Only load for prediction")
+        peft_config = LoraConfig.from_pretrained(model_args.peft_path)
+        model = get_peft_model(model, peft_config)
+        model = PeftModelForCausalLM.from_pretrained(model, model_args.peft_path, is_trainable=False)
     else:
         logger.info("Init new peft model")
         target_modules = model_args.trainable.split(',')
@@ -442,21 +448,38 @@ def main():
 
     # setting trainer.evaluate with model.generate()
     training_args.predict_with_generate = True
+    task = data_args.task_name
+    data_args.max_new_tokens = TASK_TO_MAX_NEW_TOKENS[task]
     
     # Initialize our Trainer
-    trainer = Trainer(
-        model=model,
-        args=training_args,
-        data_args=data_args,
-        train_dataset=train_dataset if training_args.do_train else None,
-        eval_dataset=eval_dataset if training_args.do_eval else None,
-        tokenizer=tokenizer,
-        data_collator=data_collator,
-        compute_metrics=compute_metrics if training_args.do_eval and not is_torch_tpu_available() else None,
-        preprocess_logits_for_metrics=preprocess_logits_for_metrics
-        if training_args.do_eval and not is_torch_tpu_available() else None,
-        callbacks=[SavePeftModelCallback],
-    )
+    if training_args.do_train:
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            data_args=data_args,
+            train_dataset=train_dataset if training_args.do_train else None,
+            eval_dataset=eval_dataset if training_args.do_eval else None,
+            tokenizer=tokenizer,
+            data_collator=data_collator,
+            compute_metrics=compute_metrics if training_args.do_eval and not is_torch_tpu_available() else None,
+            preprocess_logits_for_metrics=preprocess_logits_for_metrics
+            if training_args.do_eval and not is_torch_tpu_available() else None,
+            callbacks=[SavePeftModelCallback],
+        )
+    elif training_args.do_predict:
+        trainer = Seq2SeqTrainer(
+            model=model,
+            args=training_args,
+            data_args=data_args,
+            test_dataset=test_dataset if training_args.do_predict else None,
+            tokenizer=tokenizer,
+            data_collator=data_collator,
+            preprocess_logits_for_metrics=preprocess_logits_for_metrics
+            if training_args.do_predict and not is_torch_tpu_available() else None,
+        )
+    else:
+        raise ValueError("Must pass do_train or do_predict")
+    
 
     # Training
     if training_args.do_train:
