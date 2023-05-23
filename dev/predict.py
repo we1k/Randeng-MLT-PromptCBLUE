@@ -43,6 +43,7 @@ sys.path.append("./")
 
 from peft import PeftConfig, LoraConfig, PeftModelForCausalLM, get_peft_model
 from src.chatmed_llama_peft.instruction import TASK_TO_INSTRUCTION, TASK_TO_MAX_NEW_TOKENS
+from src.chatmed_llama_peft.build_dataset import build_instruction_dataset, DataCollatorForSupervisedDataset
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -131,8 +132,8 @@ def main(args):
     max_input_length = 1024
     
     # Temporarily set max_target_length for training.
-    max_source_length=512
-    max_target_length=10
+    max_source_length=700
+    max_target_length=196
     
     predict_dataset = build_instruction_dataset(
         data_path=[validation_file],
@@ -144,8 +145,7 @@ def main(args):
     )
 
 
-    data_collator = transformers.DataCollatorForSeq2Seq(
-    tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True)
+    data_collator = DataCollatorForSupervisedDataset(tokenizer)
     predict_dataloader = DataLoader(
         predict_dataset,
         collate_fn=data_collator,
