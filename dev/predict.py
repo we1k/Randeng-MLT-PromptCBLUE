@@ -89,7 +89,7 @@ def main(args):
 
     # load checkpoint
     LR=1e-4
-    STEP=300
+    STEP=2800
     peft_path = os.path.join('checkpoint',f'alpaca-lora-2e-4/checkpoint-{STEP}/adapter_model')
     print(peft_path)
     if not os.path.exists(peft_path):
@@ -136,7 +136,7 @@ def main(args):
     max_target_length=196
     
     predict_dataset = build_instruction_dataset(
-        data_path=[validation_file],
+        data_path=[test_file],
         tokenizer=tokenizer,
         max_source_length=max_source_length,
         max_target_length=max_target_length,
