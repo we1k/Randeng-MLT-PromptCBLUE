@@ -45,7 +45,6 @@ from transformers import (
 
 import sys
 sys.path.append("./")
-os.environ['CUDA_VISIBLE_DEVICES'] = '0'
 
 from transformers import T5Config, T5Tokenizer, T5ForConditionalGeneration
 from randen_T5.build_dataset import build_instruction_dataset
@@ -110,6 +109,14 @@ def main():
         config=config,
     ).cuda()
 
+    if model_args.checkpoint_path != None and os.path.exists(model_args.checkpoint_path):
+        logger.info(f'loading checkpoint from {model_args.checkpoint_path}')
+        weights_file = os.path.join(model_args.checkpoint_path, 'pytorch_model.bin')
+        state_dict = torch.load(weights_file, map_location='cpu')
+        model.load_state_dict(state_dict)
+        del state_dict
+        model = model.cuda()
+    
     # for n, p in model.named_parameters():
     #     print(n, p.requires_grad)
 
@@ -157,7 +164,20 @@ def main():
             )
         logger.info(f"Num eval_samples  {len(eval_dataset)}")
         logger.info("eval example:")
-        
+    
+    if training_args.do_predict:
+        with training_args.main_process_first(desc="loading and tokenization"):
+            predict_dataset = build_instruction_dataset(
+                data_path=[data_args.test_file],
+                tokenizer=tokenizer,
+                max_source_length=data_args.max_source_length,
+                max_target_length=data_args.max_target_length,
+                ignore_pad_token_for_loss=data_args.ignore_pad_token_for_loss,
+                preprocessing_num_workers=data_args.preprocessing_num_workers
+            )
+        logger.info(f"Num predict_samples  {len(predict_dataset)}")
+        logger.info("eval example:")
+    
     # Data collator
     label_pad_token_id = -100 if data_args.ignore_pad_token_for_loss else tokenizer.pad_token_id
     data_collator = DataCollatorForSeq2Seq(
@@ -192,7 +212,6 @@ def main():
         eval_dataset=eval_dataset if training_args.do_eval else None,
         tokenizer=tokenizer,
         data_collator=data_collator,
-        preprocess_logits_for_metrics=preprocess_logits_for_metrics if training_args.do_predict else None
     )
 
     # Training
@@ -228,7 +247,50 @@ def main():
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
 
+    if training_args.do_predict:
+        logger.info("*** Predict ***")
+
+        # 读取原test file
+        list_test_samples = []
+        with open(data_args.test_file, "r", encoding="utf-8") as f:
+            for line in f:
+                line = json.loads(line)
+                list_test_samples.append(line)
+
+        predict_results = trainer.predict(
+            predict_dataset,
+            metric_key_prefix="predict",
+            # max_tokens=512,
+            max_new_tokens=data_args.max_target_length,
+            # do_sample=True,
+            # top_p=0.7,
+            # temperature=0.95,
+            # repetition_penalty=1.1
+        )
+        metrics = predict_results.metrics
+        print(metrics)
+
+        trainer.log_metrics("predict", metrics)
+        trainer.save_metrics("predict", metrics)
+
+        if trainer.is_world_process_zero():
+            if training_args.predict_with_generate:
+                predictions = tokenizer.batch_decode(
+                    predict_results.predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
+                )
+                predictions = [pred.strip() for pred in predictions]
+
+                output_prediction_file = os.path.join(training_args.output_dir, "test_predictions.json")
+
+                with open(output_prediction_file, "w", encoding="utf-8") as writer:
+                    for idx, p in enumerate(predictions):
+                        samp = list_test_samples[idx]
+                        samp["target"] = p
+                        res = json.dumps(samp, ensure_ascii=False)
+                        writer.write(f"{res}\n")
+
     return results
+
 
 
 def _mp_fn(index):
