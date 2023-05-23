@@ -102,32 +102,11 @@ def main(args):
     
     
     # load dataset
-    data_path="./datasets/toy_examples/"
+    data_path=args.data_path
     train_file =  os.path.join(data_path, 'train.json')
     validation_file =  os.path.join(data_path, 'dev.json')
     test_file =  os.path.join(data_path, 'test.json')
-    # Load dataset
-    data_files = {}
-    if train_file is not None:
-        data_files["train"] = train_file
-        extension = train_file.split(".")[-1]
-    if validation_file is not None:
-        data_files["validation"] = validation_file
-        extension = validation_file.split(".")[-1]
-    if test_file is not None:
-        data_files["test"] = test_file
-        extension = test_file.split(".")[-1]
 
-    raw_datasets = load_dataset(
-        extension,
-        data_files=data_files,
-    )
-
-    # Get the column names for input/target.
-    prompt_column = 'input'
-    response_column = 'target'
-
-    column_names = raw_datasets["validation"].column_names
     # Temporarily set max_target_length for training.
     max_input_length = 1024
     
@@ -138,12 +117,12 @@ def main(args):
     predict_dataset = build_instruction_dataset(
         data_path=[test_file],
         tokenizer=tokenizer,
-        max_source_length=max_source_length,
-        max_target_length=max_target_length,
-        ignore_pad_token_for_loss=True,
+        data_cache_dir = None,
+        max_seq_length=max_input_length,
         preprocessing_num_workers=8
     )
-
+    logger.info(f"Num predict_samples  {len(predict_dataset)}")
+    logger.info("predict example:")
 
     data_collator = DataCollatorForSupervisedDataset(tokenizer)
     predict_dataloader = DataLoader(
@@ -174,15 +153,12 @@ def main(args):
     all_pred = []
     for step, batch in enumerate(predict_dataloader):
         inputs = {k:v.to(device) for k, v in batch.items()}
-        inputs['max_new_tokens'] = TASK_TO_MAX_NEW_TOKENS[args.task]
+        # todo: add!
+        inputs['max_new_tokens'] = max_target_length
         output = model.generate(**inputs)
         predictions = tokenizer.batch_decode(output, skip_special_tokens=True,clean_up_tokenization_spaces=True)
-        inputs["labels"] = inputs["labels"].where(inputs["labels"]==-100, tokenizer.pad_token_id)
-        labels = tokenizer.batch_decode(inputs['labels'], skip_special_tokens=True,clean_up_tokenization_spaces=True)
-        print(predictions, labels)
-        break
-        # predictions = [pred.strip() for pred in predictions]
-        # all_pred += predictions
+        predictions = [pred.strip() for pred in predictions]
+        all_pred += predictions
         
                 
     output_prediction_file = os.path.join(args.output_dir, f'{args.task}/test_prediction.json')
@@ -217,7 +193,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--data_path',
         type=str,
-        default='data'
+        default='datasets/alpaca'
     )
     parser.add_argument(
         '--fp16',
@@ -227,6 +203,16 @@ if __name__ == '__main__':
         '--per_device_eval_batch_size',
         type=int,
         default=32
+    )
+    parser.add_argument(
+        '--max_target_length',
+        type=int,
+        default=196
+    )
+    parser.add_argument(
+        '--max_source_length',
+        type=int,
+        default=700
     )
     parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
     args = parser.parse_args()
