@@ -1,4 +1,5 @@
 /datasets/
+/dataset
 /model/
 pics/
 checkpoint/
@@ -6,3 +7,6 @@ checkpoint/
 /chinese-llama-alpaca-plus-lora-7b
 /wandb
 *.pyc
+/alpaca
+/cache
+/toy_dir

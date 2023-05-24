@@ -87,7 +87,7 @@ def main(args):
 
     
     # load dataset
-    data_path=f"alpaca/{args.task}"
+    data_path=f"data/{args.task}"
     train_file =  os.path.join(data_path, 'train.json')
     validation_file =  os.path.join(data_path, 'dev.json')
     test_file =  os.path.join(data_path, 'test.json')
@@ -151,15 +151,14 @@ def main(args):
         inputs['max_new_tokens'] = TASK_TO_MAX_NEW_TOKENS[args.task]
         output = model.generate(**inputs)
         predictions = tokenizer.batch_decode(output, skip_special_tokens=True,clean_up_tokenization_spaces=True)
-        inputs["labels"] = inputs["labels"].where(inputs["labels"]==-100, tokenizer.pad_token_id)
-        labels = tokenizer.batch_decode(inputs['labels'], skip_special_tokens=True,clean_up_tokenization_spaces=True)
-        print(predictions, labels)
-        break
-        # predictions = [pred.strip() for pred in predictions]
-        # all_pred += predictions
+        # inputs["labels"] = inputs["labels"].where(inputs["labels"]==-100, tokenizer.pad_token_id)
+        # labels = tokenizer.batch_decode(inputs['labels'], skip_special_tokens=True,clean_up_tokenization_spaces=True)
+        # print(predictions, labels)
+        predictions = [pred.strip() for pred in predictions]
+        all_pred += predictions
         
                 
-    output_prediction_file = os.path.join(args.output_dir, f'{args.task}/test_prediction.json')
+    output_prediction_file = os.path.join(args.output_dir, f'/test_prediction.json')
         
     with open(output_prediction_file, "w", encoding="utf-8") as writer:
         for idx, p in enumerate(all_pred):
@@ -174,7 +173,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--output_dir',
         type=str,
-        default='alpaca',
+        default='data/CHIP-STS',
     )
     parser.add_argument(
         '--model_name_or_path',
