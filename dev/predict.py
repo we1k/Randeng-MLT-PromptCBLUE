@@ -35,7 +35,7 @@ from transformers import (
     set_seed,
 )
 
-os.environ['CUDA_VISIBLE_DEVICES']='0,1,2,3'
+os.environ['CUDA_VISIBLE_DEVICES']='0,3'
 os.environ["WANDB_MODE"]='disabled'
 
 import sys
@@ -202,7 +202,7 @@ if __name__ == '__main__':
     parser.add_argument(
         '--per_device_eval_batch_size',
         type=int,
-        default=32
+        default=2
     )
     parser.add_argument(
         '--max_target_length',
