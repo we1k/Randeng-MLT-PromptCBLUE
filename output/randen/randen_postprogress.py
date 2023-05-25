@@ -35,8 +35,7 @@ def process_generated_results(pred_file):
 
             sample_id_ = line.get("sample_id", "xxxx")
             input = line["input"]
-            # gen_output = line["target"]
-            gen_output = 'test_output'
+            gen_output = line["target"]
             gen_output = gen_output.replace(":", "：", 100).replace(",", "，", 100).replace(";", "；", 100)
             # gen_output = line["generated_output"]
             task_dataset = line["task_dataset"]
@@ -54,7 +53,7 @@ def process_generated_results(pred_file):
                 list_entities = []
                 assert isinstance(answer_choices, list)
                 for choice in answer_choices:
-                    for piece in gen_output.split("\n"):
+                    for piece in gen_output.split(" "):
                         if piece.startswith(f"{choice}实体"):
                             mentions = piece.replace(f"{choice}实体：", "").split("，")
                             mentions = [w.strip() for w in mentions if len(w.strip()) > 0]
@@ -84,7 +83,7 @@ def process_generated_results(pred_file):
 
                 list_spos = []
                 assert isinstance(answer_choices, list)
-                list_answer_strs = gen_output.split("\n")
+                list_answer_strs = gen_output.split(" ")
 
                 for line in list_answer_strs:
                     # print("line: ", line)
@@ -128,7 +127,7 @@ def process_generated_results(pred_file):
                 # 答案格式：
                 #   多个选中的标准化实体，用 ， 符号分割
 
-                answer_str = gen_output.split("\n")[-1]
+                answer_str = gen_output.split(" ")[-1]
                 answers = answer_str.split("，")
                 answers = [w.strip() for w in answers if len(w.strip()) > 0]
                 #
@@ -161,7 +160,7 @@ def process_generated_results(pred_file):
                 #                                  字段值有多个，则用 ，符号分隔
                 keys = ["主体词", "发生状态", "描述词", "解剖部位"]
 
-                list_answer_strs = gen_output.split("\n")[1: ]
+                list_answer_strs = gen_output.split(" ")[1: ]
                 list_events = []
                 for ans_str in list_answer_strs:
                     event_info = {}
@@ -192,7 +191,7 @@ def process_generated_results(pred_file):
                 # print("gen_output: ", gen_output)
                 # print("list_events: ", list_events)
 
-                structured_output["CHIP-CDEE"].append(
+                structured_output[task_dataset].append(
                     {
                         "sample_id": sample_id_,
                         "answer": list_events,
@@ -268,6 +267,7 @@ def process_generated_results(pred_file):
                 #     answer_str = "后者是前者的语义父集或语义毫无关联"
 
 
+                print(task_dataset, answer_str)
                 structured_output[task_dataset].append(
                     {
                         "sample_id": sample_id_,
@@ -293,7 +293,7 @@ def process_generated_results(pred_file):
                 # 答案格式：
                 #   第一行：引导词
                 #    每一行就是 "[症状词]：[阴阳性判断结果]"
-                list_answer_strs = gen_output.split("\n")[1:]
+                list_answer_strs = gen_output.split(" ")[1:]
 
                 list_finding_attrs = []
                 for ans_str in list_answer_strs:
@@ -326,8 +326,10 @@ def process_generated_results(pred_file):
 
                 list_entities = []
                 assert isinstance(answer_choices, list)
+                ent_answers = gen_output.split(" ")[1: ]
+                
                 for choice in answer_choices:
-                    for piece in gen_output.split("\n"):
+                    for piece in ent_answers:
                         if piece.startswith(f"{choice}实体"):
                             mentions = piece.replace(f"{choice}实体：", "").split("，")
                             mentions = [w.strip() for w in mentions if len(w.strip()) > 0]
@@ -349,6 +351,7 @@ def process_generated_results(pred_file):
             elif task_dataset == "IMCS-V2-DAC":
                 # 答案格式：直接回答分类标签
                 answer_str = gen_output.strip()
+                # print(task_dataset,gen_output, answer_str)
                 # if not answer_str in answer_choices:
                 #     answer_str = "非上述类型"
 
@@ -367,7 +370,7 @@ def process_generated_results(pred_file):
                 # 答案格式：
                 #   第一行：引导词
                 #    每一行就是 "[症状词]：[阴阳性判断结果]"
-                list_answer_strs = gen_output.split("\n")[1:]
+                list_answer_strs = gen_output.split(" ")[1:]
 
                 list_finding_attrs = []
                 for ans_str in list_answer_strs:
@@ -407,7 +410,7 @@ def process_generated_results(pred_file):
                 ]
                 answer_dict = {}
                 for key in keys:
-                    for line in gen_output.strip().split("\n")[1: ]:
+                    for line in gen_output.strip().split(" ")[1: ]:
                         # print("line: ", line)
                         if not line.startswith(key):
                             continue
