@@ -10,6 +10,8 @@ import copy
 import transformers
 import random
 
+from randen_T5.instruction import TASK_TO_INSTRUCTION
+
 IGNORE_INDEX = -100
 
 logger = logging.getLogger('__name__')
@@ -21,13 +23,13 @@ TASK_TO_TASK_TYPE = {
     "CHIP-MDCFNPC" : "实体阴阳性分析",
     "CHIP-STS" : "语义匹配",
     "CMeEE-V2" : "实体识别",
-    "CMeIE" :  "关系三元组抽取",
+    "CMeIE" :  "实体三元组抽取",
     "IMCS-V2-DAC" : "意图识别", 
     "IMCS-V2-MRG" : "生成诊疗报告",
     "IMCS-V2-NER" : "实体识别",
-    "IMCS-V2-SR" : "病症属性检测",
-    "KUAKE-IR" : "语义匹配",
-    "KUAKE-QIC" : "意图识别",
+    "IMCS-V2-SR" : "实体识别并文本分类",
+    "KUAKE-IR" : "搜索与回答相关性分类",
+    "KUAKE-QIC" : "意图分类",
     "KUAKE-QQR" : "自然语言推理",
     "KUAKE-QTR" : "语义匹配",
     "MedDG" : "对话生成",

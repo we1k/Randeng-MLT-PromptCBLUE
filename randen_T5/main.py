@@ -49,7 +49,6 @@ sys.path.append("./")
 from transformers import T5Config, T5Tokenizer, T5ForConditionalGeneration
 from randen_T5.build_dataset import build_instruction_dataset
 from randen_T5.arguments import ModelArguments, DataTrainingArguments
-from randen_T5.instruction import TASK_TO_MAX_NEW_TOKENS, TASK_TO_INSTRUCTION
 
 
 

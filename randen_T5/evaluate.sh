@@ -3,7 +3,10 @@ your_data_path="datasets/PromptCBLUE"  # 填入数据集所在的文件夹路径
 your_checkpoint_path="checkpoint/randen"  # 填入用来存储模型的路径
 model_path=IDEA-CCNL/Randeng-T5-784M-MultiTask-Chinese
 
-STEP=2000    # 用来评估的模型checkpoint是训练了多少步
+STEP=4000    # 用来评估的模型checkpoint是训练了多少步
+
+python $your_checkpoint_path/checkpoint-$STEP/zero_to_fp32.py \
+    $your_checkpoint_path/checkpoint-$STEP/ $your_checkpoint_path/checkpoint-$STEP/pytorch_model.bin
 
 CUDA_VISIBLE_DEVICES=0 python randen_T5/main.py \
     --do_predict \
