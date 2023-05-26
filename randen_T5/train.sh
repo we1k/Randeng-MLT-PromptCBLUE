@@ -4,7 +4,7 @@ export CUDA_VISIBLE_DEVICES='0,1,2,3'
 gpu_num=$(echo $CUDA_VISIBLE_DEVICES | awk -F ',' '{print NF}')
 echo $gpu_num $CUDA_VISIBLE_DEVICES
 
-export WANDB_MODE=disabled
+# export WANDB_MODE=disabled
 your_data_path="datasets/PromptCBLUE"  # 填入数据集所在的文件夹路径
 your_checkpoint_path="checkpoint/randen"  # 填入用来存储模型的路径
 model_path=IDEA-CCNL/Randeng-T5-784M-MultiTask-Chinese
@@ -36,7 +36,7 @@ torchrun \
     --per_device_eval_batch_size 8 \
     --gradient_accumulation_steps 4 \
     --max_steps 4000 \
-    --logging_steps 200 \
+    --logging_steps 50 \
     --save_steps 200 \
     --save_total_limit 5 \
     --learning_rate $LR \

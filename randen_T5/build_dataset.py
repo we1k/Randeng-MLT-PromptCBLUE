@@ -10,30 +10,12 @@ import copy
 import transformers
 import random
 
-from randen_T5.instruction import TASK_TO_INSTRUCTION
+from randen_T5.instruction import TASK_TO_INSTRUCTION, TASK_TO_MAX_NEW_TOKENS, TASK_TO_TASK_TYPE
 
 IGNORE_INDEX = -100
 
 logger = logging.getLogger('__name__')
 
-TASK_TO_TASK_TYPE = {
-    "CHIP-CDEE" : "事件三元组抽取",
-    "CHIP-CDN" :  "多项选择",
-    "CHIP-CTC" : "文本分类",
-    "CHIP-MDCFNPC" : "实体阴阳性分析",
-    "CHIP-STS" : "语义匹配",
-    "CMeEE-V2" : "实体识别",
-    "CMeIE" :  "实体三元组抽取",
-    "IMCS-V2-DAC" : "意图识别", 
-    "IMCS-V2-MRG" : "生成诊疗报告",
-    "IMCS-V2-NER" : "实体识别",
-    "IMCS-V2-SR" : "实体识别并文本分类",
-    "KUAKE-IR" : "搜索与回答相关性分类",
-    "KUAKE-QIC" : "意图分类",
-    "KUAKE-QQR" : "自然语言推理",
-    "KUAKE-QTR" : "语义匹配",
-    "MedDG" : "对话生成",
-}
 
 def build_instruction_dataset(data_path: Union[List[str],str],
                 tokenizer: transformers.PreTrainedTokenizer,
