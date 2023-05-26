@@ -4,14 +4,19 @@ import sys
 import json
 
 import numpy as np
+from tqdm import tqdm
+
+import datasets
 from datasets import load_dataset
 import jieba 
 from rouge_chinese import Rouge
 from nltk.translate.bleu_score import sentence_bleu, SmoothingFunction
 import torch
+from torch.utils.data import DataLoader
 
 from argparse import ArgumentParser
 
+import transformers
 from transformers import (
     AutoConfig,
     AutoModel,
@@ -30,7 +35,7 @@ from transformers import (
     set_seed,
 )
 
-os.environ['CUDA_VISIBLE_DEVICES']='0,1,2,3'
+os.environ['CUDA_VISIBLE_DEVICES']='0,3'
 os.environ["WANDB_MODE"]='disabled'
 
 import sys
@@ -38,13 +43,35 @@ sys.path.append("./")
 
 from peft import PeftConfig, LoraConfig, PeftModelForCausalLM, get_peft_model
 from src.chatmed_llama_peft.instruction import TASK_TO_INSTRUCTION, TASK_TO_MAX_NEW_TOKENS
+from src.chatmed_llama_peft.build_dataset import build_instruction_dataset, DataCollatorForSupervisedDataset
 
 from accelerate import Accelerator
-accelerator = Accelerator()
-device = accelerator.device
+from accelerate.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 def main(args):
+    accelerator = Accelerator()
+    device = accelerator.device
+    # Make one log on every process with the configuration for debugging.
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+        datefmt="%m/%d/%Y %H:%M:%S",
+        level=logging.INFO,
+    )
+    logger.info(accelerator.state, main_process_only=False)
+    if accelerator.is_local_main_process:
+        datasets.utils.logging.set_verbosity_warning()
+        transformers.utils.logging.set_verbosity_info()
+    else:
+        datasets.utils.logging.set_verbosity_error()
+        transformers.utils.logging.set_verbosity_error()
+
+    # If passed along, set the training seed now.
+    if args.seed is not None:
+        set_seed(args.seed)
+        
     # load_model 
     config = LlamaConfig.from_pretrained(
         args.model_name_or_path,
@@ -62,8 +89,8 @@ def main(args):
 
     # load checkpoint
     LR=1e-4
-    STEP=300
-    peft_path = os.path.join('checkpoint',f'{args.task}-{LR}/checkpoint-{STEP}/adapter_model')
+    STEP=2800
+    peft_path = os.path.join('checkpoint',f'alpaca-lora-2e-4/checkpoint-{STEP}/adapter_model')
     print(peft_path)
     if not os.path.exists(peft_path):
         raise ValueError(f"No peft path :{peft_path}")
@@ -75,119 +102,84 @@ def main(args):
     
     
     # load dataset
-    data_path="./datasets/toy_examples/"
+    data_path=args.data_path
     train_file =  os.path.join(data_path, 'train.json')
     validation_file =  os.path.join(data_path, 'dev.json')
     test_file =  os.path.join(data_path, 'test.json')
-    # Load dataset
-    data_files = {}
-    if train_file is not None:
-        data_files["train"] = train_file
-        extension = train_file.split(".")[-1]
-    if validation_file is not None:
-        data_files["validation"] = validation_file
-        extension = validation_file.split(".")[-1]
-    if test_file is not None:
-        data_files["test"] = test_file
-        extension = test_file.split(".")[-1]
 
-    raw_datasets = load_dataset(
-        extension,
-        data_files=data_files,
-    )
-
-    # Get the column names for input/target.
-    prompt_column = 'input'
-    response_column = 'target'
-
-    column_names = raw_datasets["validation"].column_names
     # Temporarily set max_target_length for training.
     max_input_length = 1024
     
+    # Temporarily set max_target_length for training.
+    max_source_length=700
+    max_target_length=196
     
-    def generate_prompt(instruction, data):
-        return f"""### 指令:\n{instruction}\n### 输入:\n{data[prompt_column]}\n### 输出:\n{tokenizer.bos_token + data[response_column] + tokenizer.eos_token}
-        """
-        
-    def tokenize(prompt, add_eos_token=True):
-        result = tokenizer(
-            prompt,
-            truncation=True,
-            max_length=max_input_length,
-            padding=False,
-            return_tensors=None,
-        )
-        if (
-            result["input_ids"][-1] != tokenizer.eos_token_id
-            and len(result["input_ids"]) < max_input_length
-            and add_eos_token
-        ):
-            result["input_ids"].append(tokenizer.eos_token_id)
-            result["attention_mask"].append(1)
+    predict_dataset = build_instruction_dataset(
+        data_path=[test_file],
+        tokenizer=tokenizer,
+        data_cache_dir = None,
+        max_seq_length=max_input_length,
+        preprocessing_num_workers=8
+    )
+    logger.info(f"Num predict_samples  {len(predict_dataset)}")
+    logger.info("predict example:")
+
+    data_collator = DataCollatorForSupervisedDataset(tokenizer)
+    predict_dataloader = DataLoader(
+        predict_dataset,
+        collate_fn=data_collator,
+        batch_size=args.per_device_eval_batch_size,
+    )
     
-        result["labels"] = result["input_ids"].copy()
- 
-        return result
-
-    def preprocess_function(data_point):
-        instruction = TASK_TO_INSTRUCTION[data_point['task_dataset']]
-        full_prompt = generate_prompt(instruction, data_point)
-        tokenized_full_prompt = tokenize(full_prompt)
-        return tokenized_full_prompt
-
-    # Main data processing function that will make each entry its own in the dataset
-    def single_texts(examples):
-        result = examples
-        result["labels"] = examples["input_ids"].copy()
-        return result
-
-
-    tokenized_datasets = raw_datasets.map(
-        preprocess_function,
-        # batched=True,
-        num_proc=4,
-        remove_columns=column_names,
-        load_from_cache_file=True,
+    # prepare everything with accelerator
+    model, predict_dataloader = accelerator.prepare(
+        model, predict_dataloader
     )
 
-    lm_dataset = tokenized_datasets.map(single_texts, batched=True, num_proc=4)
-    # lm_dataset = tokenized_dataset
-    lm_dataset.set_format('torch', columns=['input_ids', 'attention_mask' ,'labels'])
+    model.eval()
+    # 
+    total_batch_size = args.per_device_eval_batch_size * accelerator.num_processes
+    logger.info("***** Running predictions *****")
+    logger.info(f"  Num examples = {len(predict_dataset)}")
+    logger.info(f"  Instantaneous batch size per device = {args.per_device_eval_batch_size}")
+    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     
-    
-    def compute_metrics(eval_pred):
-        preds, labels = eval_pred
-        if isinstance(preds, tuple):
-            preds = preds[0]
-            
-        labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+    # 读取原test file
+    list_test_samples = []
+    with open(test_file, "r", encoding="utf-8") as f:
+        line = f.readline()
+        list_test_samples = json.loads(line)
+
+    all_pred = []
+    for step, batch in enumerate(predict_dataloader):
+        inputs = {k:v.to(device) for k, v in batch.items()}
+        # todo: add!
+        inputs['max_new_tokens'] = max_target_length
+        output = model.generate(**inputs)
+        predictions = tokenizer.batch_decode(output, skip_special_tokens=True,clean_up_tokenization_spaces=True)
+        predictions = [pred.strip() for pred in predictions]
+        all_pred += predictions
         
-        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=False)
-        decoded_preds = decoded_preds.split(f'输出:\n{tokenizer.bos_token}')[1].split(f"{tokenizer.eos_token}")[0]
-        print(decoded_preds)
-        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=False)
-        decoded_labels = decoded_labels.split(f'输出:\n{tokenizer.bos_token}')[1].split(f"{tokenizer.eos_token}")[0]
-        print(decoded_labels)
+                
+    output_prediction_file = os.path.join(args.output_dir, f'{args.task}/test_prediction.json')
         
-    def preprocess_logits_for_metrics(logits, labels):
-        if isinstance(logits, tuple):
-            # Depending on the model and config, logits may contain extra tensors,
-            # like past_key_values, but logits always come first
-            logits = logits[0]
-        return logits.argmax(dim=-1)
-        
-    
-    predict_dataset = lm_dataset["test"]
-    
-    print(predict_dataset[0])
+    with open(output_prediction_file, "w", encoding="utf-8") as writer:
+        for idx, p in enumerate(all_pred):
+            samp = list_test_samples[idx]
+            samp["output"] = p
+            res = json.dumps(samp, ensure_ascii=False)
+            writer.write(f"{res}\n")
 
         
-        
-    
-    
+
 
 if __name__ == '__main__':
     parser = ArgumentParser()
+    parser.add_argument(
+        '--output_dir',
+        type=str,
+        default='output',
+    )
     parser.add_argument(
         '--model_name_or_path',
         type=str,
@@ -201,11 +193,27 @@ if __name__ == '__main__':
     parser.add_argument(
         '--data_path',
         type=str,
-        default='data'
+        default='datasets/alpaca'
     )
     parser.add_argument(
         '--fp16',
         action='store_true',
     )
+    parser.add_argument(
+        '--per_device_eval_batch_size',
+        type=int,
+        default=2
+    )
+    parser.add_argument(
+        '--max_target_length',
+        type=int,
+        default=196
+    )
+    parser.add_argument(
+        '--max_source_length',
+        type=int,
+        default=700
+    )
+    parser.add_argument("--seed", type=int, default=None, help="A seed for reproducible training.")
     args = parser.parse_args()
     main(args)
