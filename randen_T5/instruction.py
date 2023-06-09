@@ -48,7 +48,7 @@ TASK_TO_MAX_NEW_TOKENS = {
 }
 
 TASK_TO_TASK_TYPE = {
-    "CHIP-CDEE" : "事件三元组抽取",
+    "CHIP-CDEE" : "事件抽取",
     "CHIP-CDN" :  "多项选择",
     "CHIP-CTC" : "文本分类",
     "CHIP-MDCFNPC" : "实体阴阳性分析",
@@ -56,12 +56,12 @@ TASK_TO_TASK_TYPE = {
     "CMeEE-V2" : "实体识别",
     "CMeIE" :  "实体三元组抽取",
     "IMCS-V2-DAC" : "意图识别", 
-    "IMCS-V2-MRG" : "生成诊疗报告",
+    "IMCS-V2-MRG" : "生成式摘要",
     "IMCS-V2-NER" : "实体识别",
     "IMCS-V2-SR" : "实体识别并文本分类",
     "KUAKE-IR" : "相关性分类",
     "KUAKE-QIC" : "意图分类",
     "KUAKE-QQR" : "自然语言推理",
     "KUAKE-QTR" : "语义匹配",
-    "MedDG" : "对话生成",
+    "MedDG" : "生成回复",
 }

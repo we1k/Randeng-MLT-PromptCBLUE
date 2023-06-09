@@ -10,3 +10,6 @@ checkpoint/
 /alpaca
 /cache
 /toy_dir
+/aug_data
+/DA
+/output

@@ -267,7 +267,6 @@ def process_generated_results(pred_file):
                 #     answer_str = "后者是前者的语义父集或语义毫无关联"
 
 
-                print(task_dataset, answer_str)
                 structured_output[task_dataset].append(
                     {
                         "sample_id": sample_id_,
