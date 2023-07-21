@@ -23,6 +23,9 @@ import os
 import sys
 import json
 
+import sys
+sys.path.append("./")
+
 import numpy as np
 from datasets import load_dataset
 import jieba 
@@ -40,14 +43,14 @@ from transformers import (
     HfArgumentParser,
     Seq2SeqTrainer,
     Seq2SeqTrainingArguments,
+    GenerationConfig,
     set_seed,
 )
 
-import sys
-sys.path.append("./")
+import evaluate
 
 from transformers import T5Config, T5Tokenizer, T5ForConditionalGeneration
-from randen_T5.build_dataset import build_instruction_dataset
+from randen_T5.build_dataset import build_instruction_dataset, build_test_dataset
 from randen_T5.arguments import ModelArguments, DataTrainingArguments
 
 
@@ -129,7 +132,6 @@ def main():
     max_target_length = data_args.max_target_length
 
 
-
     def print_dataset_example(example):
         print("input_ids",example["input_ids"])
         print("inputs", tokenizer.decode(example["input_ids"]))
@@ -187,6 +189,29 @@ def main():
         padding=True
     )
 
+    # Metric
+    def compute_metrics(eval_preds):
+        metric = evaluate.load('f1')
+        preds, labels = eval_preds
+        if isinstance(preds, tuple):
+            preds = preds[0]
+        
+        if data_args.ignore_pad_token_for_loss:
+            preds = np.where(preds != -100, preds, tokenizer.pad_token_id)
+            labels = np.where(labels != -100, labels, tokenizer.pad_token_id)
+        
+        decoded_preds = tokenizer.batch_decode(preds, skip_special_tokens=True)
+        decoded_labels = tokenizer.batch_decode(labels, skip_special_tokens=True)
+        score_dict = {
+            "f1" : [],
+        }
+        for pred, label in zip(preds, labels):
+            results = metric.compute(predictions=pred, references=label, average="micro")
+            score_dict['f1'].append(round(results['f1'] * 100, 2))
+        
+        score_dict["f1"] = float(np.mean(score_dict["f1"]))
+        return score_dict
+        
     def preprocess_logits_for_metrics(logits, labels):
         if isinstance(logits, tuple):
             # Depending on the model and config, logits may contain extra tensors,
@@ -211,6 +236,9 @@ def main():
         eval_dataset=eval_dataset if training_args.do_eval else None,
         tokenizer=tokenizer,
         data_collator=data_collator,
+        compute_metrics=compute_metrics if training_args.do_eval else None,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics
+        if training_args.do_eval else None
     )
 
     # Training
@@ -256,16 +284,27 @@ def main():
                 line = json.loads(line)
                 list_test_samples.append(line)
 
-        predict_results = trainer.predict(
-            predict_dataset,
-            metric_key_prefix="predict",
-            # max_tokens=512,
-            max_new_tokens=data_args.max_target_length,
-            # do_sample=True,
-            # top_p=0.7,
-            # temperature=0.95,
-            # repetition_penalty=1.1
-        )
+        # Todo: add generate config
+        if training_args.generation_config != None:
+            with open(training_args.generation_config, 'r') as f:
+                gen_kwargs = json.load(f)
+            logger.info(f'gen_kwargs:{gen_kwargs}')
+        
+            predict_results = trainer.predict(
+                predict_dataset,
+                metric_key_prefix="predict",
+                # max_tokens=512,
+                max_new_tokens=data_args.max_target_length,
+                **gen_kwargs
+            )
+        else:
+            predict_results = trainer.predict(
+                predict_dataset,
+                metric_key_prefix="predict",
+                # max_tokens=512,
+                max_new_tokens=data_args.max_target_length,
+            )
+            
         metrics = predict_results.metrics
         print(metrics)
 
@@ -274,9 +313,25 @@ def main():
 
         if trainer.is_world_process_zero():
             if training_args.predict_with_generate:
+                predictions = np.where(predict_results.predictions==-100, tokenizer.pad_token_id, predict_results.predictions)
                 predictions = tokenizer.batch_decode(
-                    predict_results.predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
+                    predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
                 )
+                # try:
+                #     predictions = tokenizer.batch_decode(
+                #         predict_results.predictions, skip_special_tokens=True, clean_up_tokenization_spaces=True
+                #     )
+                # except IndexError:
+                #     pred = predict_results.predictions
+                #     if isinstance(predict_results.predictions, torch.Tensor):
+                #         torch.save(pred, "tensor.pt")
+                #     elif  isinstance(predict_results.predictions, np.ndarray):
+                #         np.save("array.npy", pred)
+                #     else:
+                #         print(array)
+                #     print("索引超出范围！")
+                    
+
                 predictions = [pred.strip() for pred in predictions]
 
                 output_prediction_file = os.path.join(training_args.output_dir, "test_predictions.json")

@@ -1,3 +1,24 @@
+
+CHIP-MDCFNPC!!!!  根据input长度 选择 阴阳性判断结果
+通用赛道 CMeIE， NER SR-  MedDG
+
+在SR里面，判断这个实体是医生说的还是患者说的， 问号？ 吗
+阴阴的概率很小
+医生说的阳的概率更大，如果是问句多半是不确定
+
+
+发烧特别容易误判
+test-11549： 发烧不 该为不确定 发烧吗， 发烧么
+test-11536， test-37380， test-10440， test-15229， test-13984， test-28984
+test-16398， test-17368， test-24092， test-117295， test-26097
+
+CDEE 替换,
+; CMeEE-V2 替换，
+
+QQR：尝试根据sent和sent编码， 超过50% 完全无关修改， 超过 6/7 判断无关
+
+SR和IR verbalaiser 提升
+
 3. 对比加载adapter和直接加载state dict
 
 测试trainer.py中 _load_from_checkpoint是否可行
@@ -23,10 +44,46 @@ hard task: "CHIP-MDCFNPC" "IMCS-V2-MRG"
 # reconstruct dataset : 
 
 # TODO:
-更新数据集
+调整：数据集格式
 event_extraction : CHIP-CDEE 删除target第一行
 report generation : IMCS-V2-MRG  删除target第一行
 attr_cls : IMCS-V2-SR  删除target第一行 : 
            "CHIP-MDCFNPC" 删除target第一行, 替换映射
 
+调整：generation config
 
+调整增强数据集
+
+CHIP-CDEE/CTC, KUAKE-QQR, QTR, IMCS-SR, 
+
+CMeIE: 关系三元组识别
+CDEE : 临床事件三元组检测
+SR : 检测对话历史记录中的症状症状阴阳性
+QTR: 两句话的语义关系 (完全一致，语义子集，完全无关)
+QQR: 两句话的语义相似程度 (不匹配，完全匹配，很少匹配)
+
+CMeEE-V2 可以提升效果
+
+数据脏：
+IMCS-V2-SR: "dev-12964"
+KUAKE-QIC: {"target": "治疗方案", "sample_id": "dev-2967", "label": "非上述类型"}
+难
+QTR,QQR
+CMeEE
+CNeIE
+CDEE
+MedDG : "dev-136563"
+
+
+CMeIE
+CHIP-CDEE
+KUAKE-QQR
+
+
+调整增强数据集: 
+1. train 一个 clf KUAKE-QTR
+2. 拿clf 去鉴别PLM生成样本
+
+repetition_penalty=2.5,
+length_penalty=1.0,
+early_stopping=True
