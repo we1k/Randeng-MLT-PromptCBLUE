@@ -20,7 +20,7 @@ torchrun \
     --nnodes 1 \
     --nproc_per_node $gpu_num \
     --master_port 29501 \
-    src/randen_T5/main.py \
+    src/randeng/main.py \
     --do_predict \
     --checkpoint_path $your_checkpoint_path/$checkpoint_name \
     --test_file $your_data_path/test.json \

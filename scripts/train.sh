@@ -20,7 +20,7 @@ torchrun \
     --nnodes 1 \
     --nproc_per_node $gpu_num \
     --master_port 29500 \
-    randen_T5/main.py \
+    randeng/main.py \
     --do_train \
     --train_file $your_data_path/aug_train_verb.json \
     --prompt_column input \
