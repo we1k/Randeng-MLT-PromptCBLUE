@@ -1,4 +1,5 @@
-# This repo is the code implement of TianChi Competition: CCKS2023-PromptCBLUE
+# This repo is the code implement of TianChi Competition: CCKS2023-PromptCBLUE (Ranked 4 / 381 )
+
 
 # Overview
 On based of Chinese MLT Pretrained model `Randeng-MLT`, we finetune it on a Chinese Multitask medical Seq2Seq dataset, PromptCBLUE. 
