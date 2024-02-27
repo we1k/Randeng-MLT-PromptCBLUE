@@ -1,4 +1,4 @@
-# This repo is the code implement of TianChi Competition: CCKS2023-PromptCBLUE (Ranked 4 / 381 )
+# This repo is the code implement of TianChi Competition: CCKS2023-PromptCBLUE (Ranked 3 / 381 )
 
 
 # Overview
